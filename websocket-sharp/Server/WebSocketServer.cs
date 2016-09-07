@@ -558,6 +558,35 @@ namespace WebSocketSharp.Server
       _state = ServerState.Stop;
     }
 
+    private bool checkIfAvailable (
+      bool ready, bool start, bool shutting, bool stop, out string message
+    )
+    {
+      message = null;
+
+      if (!ready && _state == ServerState.Ready) {
+        message = "This operation is not available in: ready";
+        return false;
+      }
+
+      if (!start && _state == ServerState.Start) {
+        message = "This operation is not available in: start";
+        return false;
+      }
+
+      if (!shutting && _state == ServerState.ShuttingDown) {
+        message = "This operation is not available in: shutting down";
+        return false;
+      }
+
+      if (!stop && _state == ServerState.Stop) {
+        message = "This operation is not available in: stop";
+        return false;
+      }
+
+      return true;
+    }
+
     private string checkIfCertificateExists ()
     {
       return _secure && (_sslConfig == null || _sslConfig.ServerCertificate == null)
@@ -788,13 +817,19 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Stops receiving the WebSocket connection requests.
+    /// Stops receiving the WebSocket handshake requests, and closes
+    /// the WebSocket connections.
     /// </summary>
     public void Stop ()
     {
+      string msg;
+      if (!checkIfAvailable (false, true, false, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
+
       lock (_sync) {
-        var msg = _state.CheckIfAvailable (false, true, false);
-        if (msg != null) {
+        if (!checkIfAvailable (false, true, false, false, out msg)) {
           _logger.Error (msg);
           return;
         }
@@ -809,22 +844,35 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Stops receiving the WebSocket connection requests with
-    /// the specified <see cref="ushort"/> and <see cref="string"/>.
+    /// Stops receiving the WebSocket handshake requests, and closes
+    /// the WebSocket connections with the specified <paramref name="code"/> and
+    /// <paramref name="reason"/>.
     /// </summary>
     /// <param name="code">
-    /// A <see cref="ushort"/> that represents the status code indicating the reason for the stop.
+    /// A <see cref="ushort"/> that represents the status code indicating
+    /// the reason for the close. The status codes are defined in
+    /// <see href="http://tools.ietf.org/html/rfc6455#section-7.4">
+    /// Section 7.4</see> of RFC 6455.
     /// </param>
     /// <param name="reason">
-    /// A <see cref="string"/> that represents the reason for the stop.
+    /// A <see cref="string"/> that represents the reason for the close.
+    /// The size must be 123 bytes or less.
     /// </param>
     public void Stop (ushort code, string reason)
     {
-      lock (_sync) {
-        var msg = _state.CheckIfAvailable (false, true, false) ??
-                  WebSocket.CheckCloseParameters (code, reason, false);
+      string msg;
+      if (!checkIfAvailable (false, true, false, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
 
-        if (msg != null) {
+      if (!WebSocket.CheckParametersForClose (code, reason, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
+
+      lock (_sync) {
+        if (!checkIfAvailable (false, true, false, false, out msg)) {
           _logger.Error (msg);
           return;
         }
@@ -833,6 +881,7 @@ namespace WebSocketSharp.Server
       }
 
       stopReceiving (5000);
+
       if (code == (ushort) CloseStatusCode.NoStatus) {
         _services.Stop (new CloseEventArgs (), true, true);
       }
@@ -845,23 +894,33 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Stops receiving the WebSocket connection requests with
-    /// the specified <see cref="CloseStatusCode"/> and <see cref="string"/>.
+    /// Stops receiving the WebSocket handshake requests, and closes
+    /// the WebSocket connections with the specified <paramref name="code"/> and
+    /// <paramref name="reason"/>.
     /// </summary>
     /// <param name="code">
-    /// One of the <see cref="CloseStatusCode"/> enum values, represents the status code indicating
-    /// the reason for the stop.
+    /// One of the <see cref="CloseStatusCode"/> enum values that represents
+    /// the status code indicating the reason for the close.
     /// </param>
     /// <param name="reason">
-    /// A <see cref="string"/> that represents the reason for the stop.
+    /// A <see cref="string"/> that represents the reason for the close.
+    /// The size must be 123 bytes or less.
     /// </param>
     public void Stop (CloseStatusCode code, string reason)
     {
-      lock (_sync) {
-        var msg = _state.CheckIfAvailable (false, true, false) ??
-                  WebSocket.CheckCloseParameters (code, reason, false);
+      string msg;
+      if (!checkIfAvailable (false, true, false, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
 
-        if (msg != null) {
+      if (!WebSocket.CheckParametersForClose (code, reason, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
+
+      lock (_sync) {
+        if (!checkIfAvailable (false, true, false, false, out msg)) {
           _logger.Error (msg);
           return;
         }
@@ -870,6 +929,7 @@ namespace WebSocketSharp.Server
       }
 
       stopReceiving (5000);
+
       if (code == CloseStatusCode.NoStatus) {
         _services.Stop (new CloseEventArgs (), true, true);
       }

@@ -87,8 +87,7 @@ namespace WebSocketSharp.Net
     #region Internal Constructors
 
     internal EndPointListener (
-      IPAddress address,
-      int port,
+      IPEndPoint endpoint,
       bool secure,
       string certificateFolderPath,
       ServerSslConfiguration sslConfig,
@@ -96,25 +95,36 @@ namespace WebSocketSharp.Net
     )
     {
       if (secure) {
-        var cert = getCertificate (port, certificateFolderPath, sslConfig.ServerCertificate);
+        var cert =
+          getCertificate (endpoint.Port, certificateFolderPath, sslConfig.ServerCertificate);
+
         if (cert == null)
           throw new ArgumentException ("No server certificate could be found.");
 
-        _secure = secure;
-        _sslConfig = sslConfig;
-        _sslConfig.ServerCertificate = cert;
+        _secure = true;
+        _sslConfig =
+          new ServerSslConfiguration (
+            cert,
+            sslConfig.ClientCertificateRequired,
+            sslConfig.EnabledSslProtocols,
+            sslConfig.CheckCertificateRevocation
+          );
+
+        _sslConfig.ClientCertificateValidationCallback =
+          sslConfig.ClientCertificateValidationCallback;
       }
 
+      _endpoint = endpoint;
       _prefixes = new Dictionary<HttpListenerPrefix, HttpListener> ();
       _unregistered = new Dictionary<HttpConnection, HttpConnection> ();
       _unregisteredSync = ((ICollection) _unregistered).SyncRoot;
+      _socket =
+        new Socket (endpoint.Address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
 
-      _socket = new Socket (address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
       if (reuseAddress)
         _socket.SetSocketOption (SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
 
-      _endpoint = new IPEndPoint (address, port);
-      _socket.Bind (_endpoint);
+      _socket.Bind (endpoint);
       _socket.Listen (500);
       _socket.BeginAccept (onAccept, this);
     }
@@ -162,22 +172,6 @@ namespace WebSocketSharp.Net
       prefixes.Add (prefix);
     }
 
-    private void checkIfRemove ()
-    {
-      if (_prefixes.Count > 0)
-        return;
-
-      var prefs = _unhandled;
-      if (prefs != null && prefs.Count > 0)
-        return;
-
-      prefs = _all;
-      if (prefs != null && prefs.Count > 0)
-        return;
-
-      EndPointManager.RemoveEndPoint (this);
-    }
-
     private static RSACryptoServiceProvider createRSAFromFile (string filename)
     {
       byte[] pvk = null;
@@ -213,6 +207,22 @@ namespace WebSocketSharp.Net
       }
 
       return defaultCertificate;
+    }
+
+    private void leaveIfNoPrefix ()
+    {
+      if (_prefixes.Count > 0)
+        return;
+
+      var prefs = _unhandled;
+      if (prefs != null && prefs.Count > 0)
+        return;
+
+      prefs = _all;
+      if (prefs != null && prefs.Count > 0)
+        return;
+
+      EndPointManager.RemoveEndPoint (_endpoint);
     }
 
     private static void onAccept (IAsyncResult asyncResult)
@@ -280,20 +290,65 @@ namespace WebSocketSharp.Net
       return false;
     }
 
-    private HttpListener searchHttpListener (Uri uri, out HttpListenerPrefix prefix)
+    private static HttpListener searchHttpListenerFromSpecial (
+      string path, List<HttpListenerPrefix> prefixes
+    )
     {
-      prefix = null;
+      if (prefixes == null)
+        return null;
+
+      HttpListener bestMatch = null;
+
+      var bestLen = -1;
+      foreach (var pref in prefixes) {
+        var prefPath = pref.Path;
+
+        var len = prefPath.Length;
+        if (len < bestLen)
+          continue;
+
+        if (path.StartsWith (prefPath)) {
+          bestLen = len;
+          bestMatch = pref.Listener;
+        }
+      }
+
+      return bestMatch;
+    }
+
+    #endregion
+
+    #region Internal Methods
+
+    internal static bool CertificateExists (int port, string folderPath)
+    {
+      if (folderPath == null || folderPath.Length == 0)
+        folderPath = _defaultCertFolderPath;
+
+      var cer = Path.Combine (folderPath, String.Format ("{0}.cer", port));
+      var key = Path.Combine (folderPath, String.Format ("{0}.key", port));
+
+      return File.Exists (cer) && File.Exists (key);
+    }
+
+    internal void RemoveConnection (HttpConnection connection)
+    {
+      lock (_unregisteredSync)
+        _unregistered.Remove (connection);
+    }
+
+    internal bool TrySearchHttpListener (Uri uri, out HttpListener listener)
+    {
+      listener = null;
 
       if (uri == null)
-        return null;
+        return false;
 
       var host = uri.Host;
       var dns = Uri.CheckHostName (host) == UriHostNameType.Dns;
       var port = uri.Port.ToString ();
       var path = HttpUtility.UrlDecode (uri.AbsolutePath);
       var pathSlash = path[path.Length - 1] != '/' ? path + "/" : path;
-
-      HttpListener bestMatch = null;
 
       if (host != null && host.Length > 0) {
         var bestLen = -1;
@@ -315,92 +370,28 @@ namespace WebSocketSharp.Net
 
           if (path.StartsWith (prefPath) || pathSlash.StartsWith (prefPath)) {
             bestLen = len;
-            bestMatch = _prefixes[pref];
-            prefix = pref;
+            listener = _prefixes[pref];
           }
         }
 
         if (bestLen != -1)
-          return bestMatch;
+          return true;
       }
 
       var prefs = _unhandled;
-      bestMatch = searchHttpListenerFromSpecial (path, prefs, out prefix);
-      if (bestMatch == null && pathSlash != path)
-        bestMatch = searchHttpListenerFromSpecial (pathSlash, prefs, out prefix);
+      listener = searchHttpListenerFromSpecial (path, prefs);
+      if (listener == null && pathSlash != path)
+        listener = searchHttpListenerFromSpecial (pathSlash, prefs);
 
-      if (bestMatch != null)
-        return bestMatch;
+      if (listener != null)
+        return true;
 
       prefs = _all;
-      bestMatch = searchHttpListenerFromSpecial (path, prefs, out prefix);
-      if (bestMatch == null && pathSlash != path)
-        bestMatch = searchHttpListenerFromSpecial (pathSlash, prefs, out prefix);
+      listener = searchHttpListenerFromSpecial (path, prefs);
+      if (listener == null && pathSlash != path)
+        listener = searchHttpListenerFromSpecial (pathSlash, prefs);
 
-      return bestMatch;
-    }
-
-    private static HttpListener searchHttpListenerFromSpecial (
-      string path, List<HttpListenerPrefix> prefixes, out HttpListenerPrefix prefix
-    )
-    {
-      prefix = null;
-
-      if (prefixes == null)
-        return null;
-
-      HttpListener bestMatch = null;
-
-      var bestLen = -1;
-      foreach (var pref in prefixes) {
-        var prefPath = pref.Path;
-
-        var len = prefPath.Length;
-        if (len < bestLen)
-          continue;
-
-        if (path.StartsWith (prefPath)) {
-          bestLen = len;
-          bestMatch = pref.Listener;
-          prefix = pref;
-        }
-      }
-
-      return bestMatch;
-    }
-
-    #endregion
-
-    #region Internal Methods
-
-    internal bool BindHttpListenerTo (HttpListenerContext context)
-    {
-      HttpListenerPrefix pref;
-      var lsnr = searchHttpListener (context.Request.Url, out pref);
-      if (lsnr == null)
-        return false;
-
-      context.Listener = lsnr;
-      context.Connection.Prefix = pref;
-
-      return true;
-    }
-
-    internal static bool CertificateExists (int port, string folderPath)
-    {
-      if (folderPath == null || folderPath.Length == 0)
-        folderPath = _defaultCertFolderPath;
-
-      var cer = Path.Combine (folderPath, String.Format ("{0}.cer", port));
-      var key = Path.Combine (folderPath, String.Format ("{0}.key", port));
-
-      return File.Exists (cer) && File.Exists (key);
-    }
-
-    internal void RemoveConnection (HttpConnection connection)
-    {
-      lock (_unregisteredSync)
-        _unregistered.Remove (connection);
+      return listener != null;
     }
 
     #endregion
@@ -493,7 +484,7 @@ namespace WebSocketSharp.Net
         }
         while (Interlocked.CompareExchange (ref _unhandled, future, current) != current);
 
-        checkIfRemove ();
+        leaveIfNoPrefix ();
         return;
       }
 
@@ -509,7 +500,7 @@ namespace WebSocketSharp.Net
         }
         while (Interlocked.CompareExchange (ref _all, future, current) != current);
 
-        checkIfRemove ();
+        leaveIfNoPrefix ();
         return;
       }
 
@@ -524,7 +515,7 @@ namespace WebSocketSharp.Net
       }
       while (Interlocked.CompareExchange (ref _prefixes, prefs2, prefs) != prefs);
 
-      checkIfRemove ();
+      leaveIfNoPrefix ();
     }
 
     #endregion
