@@ -964,6 +964,36 @@ namespace WebSocketSharp
       return true;
     }
 
+    internal static bool TryGetUTF8EncodedBytes (this string s, out byte[] bytes)
+    {
+      bytes = null;
+
+      try {
+        bytes = Encoding.UTF8.GetBytes (s);
+      }
+      catch {
+        return false;
+      }
+
+      return true;
+    }
+
+    internal static bool TryOpenRead (
+      this FileInfo fileInfo, out FileStream fileStream
+    )
+    {
+      fileStream = null;
+
+      try {
+        fileStream = fileInfo.OpenRead ();
+      }
+      catch {
+        return false;
+      }
+
+      return true;
+    }
+
     internal static string Unquote (this string value)
     {
       var start = value.IndexOf ('"');

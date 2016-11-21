@@ -1032,23 +1032,33 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Stops receiving the HTTP requests with the specified <see cref="CloseStatusCode"/> and
-    /// <see cref="string"/> used to stop the WebSocket services.
+    /// Stops receiving the incoming requests, and closes the connections with
+    /// the specified <paramref name="code"/> and <paramref name="reason"/> for
+    /// the WebSocket connection close.
     /// </summary>
     /// <param name="code">
-    /// One of the <see cref="CloseStatusCode"/> enum values, represents the status code indicating
-    /// the reason for the stop.
+    /// One of the <see cref="CloseStatusCode"/> enum values that represents
+    /// the status code indicating the reason for the WebSocket connection close.
     /// </param>
     /// <param name="reason">
-    /// A <see cref="string"/> that represents the reason for the stop.
+    /// A <see cref="string"/> that represents the reason for the WebSocket
+    /// connection close. The size must be 123 bytes or less.
     /// </param>
     public void Stop (CloseStatusCode code, string reason)
     {
-      lock (_sync) {
-        var msg = _state.CheckIfAvailable (false, true, false) ??
-                  WebSocket.CheckCloseParameters (code, reason, false);
+      string msg;
+      if (!checkIfAvailable (false, true, false, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
 
-        if (msg != null) {
+      if (!WebSocket.CheckParametersForClose (code, reason, false, out msg)) {
+        _logger.Error (msg);
+        return;
+      }
+
+      lock (_sync) {
+        if (!checkIfAvailable (false, true, false, false, out msg)) {
           _logger.Error (msg);
           return;
         }
