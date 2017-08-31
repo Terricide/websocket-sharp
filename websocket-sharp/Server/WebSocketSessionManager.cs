@@ -45,7 +45,7 @@ namespace WebSocketSharp.Server
 
     private volatile bool                         _clean;
     private object                                _forSweep;
-    private Logger                                _logger;
+    private Logger                                _log;
     private Dictionary<string, IWebSocketSession> _sessions;
     private volatile ServerState                  _state;
     private volatile bool                         _sweeping;
@@ -57,14 +57,9 @@ namespace WebSocketSharp.Server
 
     #region Internal Constructors
 
-    internal WebSocketSessionManager ()
-      : this (new Logger ())
+    internal WebSocketSessionManager (Logger log)
     {
-    }
-
-    internal WebSocketSessionManager (Logger logger)
-    {
-      _logger = logger;
+      _log = log;
 
       _clean = true;
       _forSweep = new object ();
@@ -151,19 +146,37 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Gets the session with the specified <paramref name="id"/>.
+    /// Gets the session instance with <paramref name="id"/>.
     /// </summary>
     /// <value>
-    /// A <see cref="IWebSocketSession"/> instance that provides the access to
-    /// the information in the session, or <see langword="null"/> if it's not found.
+    ///   <para>
+    ///   A <see cref="IWebSocketSession"/> instance or <see langword="null"/>
+    ///   if not found.
+    ///   </para>
+    ///   <para>
+    ///   The session instance provides the function to access the information
+    ///   in the session.
+    ///   </para>
     /// </value>
     /// <param name="id">
     /// A <see cref="string"/> that represents the ID of the session to find.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="id"/> is an empty string.
+    /// </exception>
     public IWebSocketSession this[string id] {
       get {
+        if (id == null)
+          throw new ArgumentNullException ("id");
+
+        if (id.Length == 0)
+          throw new ArgumentException ("An empty string.", "id");
+
         IWebSocketSession session;
-        TryGetSession (id, out session);
+        tryGetSession (id, out session);
 
         return session;
       }
@@ -237,13 +250,23 @@ namespace WebSocketSharp.Server
     private void broadcast (Opcode opcode, byte[] data, Action completed)
     {
       var cache = new Dictionary<CompressionMethod, byte[]> ();
+
       try {
-        Broadcast (opcode, data, cache);
+        foreach (var session in Sessions) {
+          if (_state != ServerState.Start) {
+            _log.Error ("The service is shutting down.");
+            break;
+          }
+
+          session.Context.WebSocket.Send (opcode, data, cache);
+        }
+
         if (completed != null)
           completed ();
       }
       catch (Exception ex) {
-        _logger.Fatal (ex.ToString ());
+        _log.Error (ex.Message);
+        _log.Debug (ex.ToString ());
       }
       finally {
         cache.Clear ();
@@ -253,13 +276,23 @@ namespace WebSocketSharp.Server
     private void broadcast (Opcode opcode, Stream stream, Action completed)
     {
       var cache = new Dictionary <CompressionMethod, Stream> ();
+
       try {
-        Broadcast (opcode, stream, cache);
+        foreach (var session in Sessions) {
+          if (_state != ServerState.Start) {
+            _log.Error ("The service is shutting down.");
+            break;
+          }
+
+          session.Context.WebSocket.Send (opcode, stream, cache);
+        }
+
         if (completed != null)
           completed ();
       }
       catch (Exception ex) {
-        _logger.Fatal (ex.ToString ());
+        _log.Error (ex.Message);
+        _log.Debug (ex.ToString ());
       }
       finally {
         foreach (var cached in cache.Values)
@@ -290,16 +323,36 @@ namespace WebSocketSharp.Server
       _sweepTimer.Elapsed += (sender, e) => Sweep ();
     }
 
+    private void stop (PayloadData payloadData, bool send)
+    {
+      var bytes = send
+                  ? WebSocketFrame.CreateCloseFrame (payloadData, false).ToArray ()
+                  : null;
+
+      lock (_sync) {
+        _state = ServerState.ShuttingDown;
+
+        _sweepTimer.Enabled = false;
+        foreach (var session in _sessions.Values.ToList ())
+          session.Context.WebSocket.Close (payloadData, bytes);
+
+        _state = ServerState.Stop;
+      }
+    }
+
     private bool tryGetSession (string id, out IWebSocketSession session)
     {
-      bool ret;
-      lock (_sync)
-        ret = _sessions.TryGetValue (id, out session);
+      session = null;
 
-      if (!ret)
-        _logger.Error ("A session with the specified ID isn't found:\n  ID: " + id);
+      if (_state != ServerState.Start)
+        return false;
 
-      return ret;
+      lock (_sync) {
+        if (_state != ServerState.Start)
+          return false;
+
+        return _sessions.TryGetValue (id, out session);
+      }
     }
 
     #endregion
@@ -320,22 +373,28 @@ namespace WebSocketSharp.Server
     }
 
     internal void Broadcast (
-      Opcode opcode, byte[] data, Dictionary<CompressionMethod, byte[]> cache)
+      Opcode opcode, byte[] data, Dictionary<CompressionMethod, byte[]> cache
+    )
     {
       foreach (var session in Sessions) {
-        if (_state != ServerState.Start)
+        if (_state != ServerState.Start) {
+          _log.Error ("The service is shutting down.");
           break;
+        }
 
         session.Context.WebSocket.Send (opcode, data, cache);
       }
     }
 
     internal void Broadcast (
-      Opcode opcode, Stream stream, Dictionary <CompressionMethod, Stream> cache)
+      Opcode opcode, Stream stream, Dictionary <CompressionMethod, Stream> cache
+    )
     {
       foreach (var session in Sessions) {
-        if (_state != ServerState.Start)
+        if (_state != ServerState.Start) {
+          _log.Error ("The service is shutting down.");
           break;
+        }
 
         session.Context.WebSocket.Send (opcode, stream, cache);
       }
@@ -368,17 +427,14 @@ namespace WebSocketSharp.Server
       }
     }
 
-    internal void Stop (CloseEventArgs e, byte[] frameAsBytes, bool receive)
+    internal void Stop (ushort code, string reason)
     {
-      lock (_sync) {
-        _state = ServerState.ShuttingDown;
-
-        _sweepTimer.Enabled = false;
-        foreach (var session in _sessions.Values.ToList ())
-          session.Context.WebSocket.Close (e, frameAsBytes, receive);
-
-        _state = ServerState.Stop;
+      if (code == 1005) { // == no status
+        stop (PayloadData.Empty, true);
+        return;
       }
+
+      stop (new PayloadData (code, reason), !code.IsReserved ());
     }
 
     #endregion
@@ -386,20 +442,26 @@ namespace WebSocketSharp.Server
     #region Public Methods
 
     /// <summary>
-    /// Sends binary <paramref name="data"/> to every client in the WebSocket service.
+    /// Sends <paramref name="data"/> to every client in the WebSocket service.
     /// </summary>
     /// <param name="data">
     /// An array of <see cref="byte"/> that represents the binary data to send.
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="data"/> is <see langword="null"/>.
+    /// </exception>
     public void Broadcast (byte[] data)
     {
-      var msg = _state.CheckIfAvailable (false, true, false) ??
-                WebSocket.CheckSendParameter (data);
-
-      if (msg != null) {
-        _logger.Error (msg);
-        return;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
+
+      if (data == null)
+        throw new ArgumentNullException ("data");
 
       if (data.LongLength <= WebSocket.FragmentLength)
         broadcast (Opcode.Binary, data, null);
@@ -408,22 +470,36 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Sends text <paramref name="data"/> to every client in the WebSocket service.
+    /// Sends <paramref name="data"/> to every client in the WebSocket service.
     /// </summary>
     /// <param name="data">
     /// A <see cref="string"/> that represents the text data to send.
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="data"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="data"/> could not be UTF-8-encoded.
+    /// </exception>
     public void Broadcast (string data)
     {
-      var msg = _state.CheckIfAvailable (false, true, false) ??
-                WebSocket.CheckSendParameter (data);
-
-      if (msg != null) {
-        _logger.Error (msg);
-        return;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
 
-      var bytes = data.UTF8Encode ();
+      if (data == null)
+        throw new ArgumentNullException ("data");
+
+      byte[] bytes;
+      if (!data.TryGetUTF8EncodedBytes (out bytes)) {
+        var msg = "It could not be UTF-8-encoded.";
+        throw new ArgumentException (msg, "data");
+      }
+
       if (bytes.LongLength <= WebSocket.FragmentLength)
         broadcast (Opcode.Text, bytes, null);
       else
@@ -431,28 +507,118 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Sends binary <paramref name="data"/> asynchronously to every client in
+    /// Sends the data from <paramref name="stream"/> to every client in
     /// the WebSocket service.
     /// </summary>
     /// <remarks>
-    /// This method doesn't wait for the send to be complete.
+    /// The data is sent as the binary data.
+    /// </remarks>
+    /// <param name="stream">
+    /// A <see cref="Stream"/> instance from which to read the data to send.
+    /// </param>
+    /// <param name="length">
+    /// An <see cref="int"/> that specifies the number of bytes to send.
+    /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="stream"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="stream"/> cannot be read.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="length"/> is less than 1.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   No data could be read from <paramref name="stream"/>.
+    ///   </para>
+    /// </exception>
+    public void Broadcast (Stream stream, int length)
+    {
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
+      }
+
+      if (stream == null)
+        throw new ArgumentNullException ("stream");
+
+      if (!stream.CanRead) {
+        var msg = "It cannot be read.";
+        throw new ArgumentException (msg, "stream");
+      }
+
+      if (length < 1) {
+        var msg = "Less than 1.";
+        throw new ArgumentException (msg, "length");
+      }
+
+      var bytes = stream.ReadBytes (length);
+
+      var len = bytes.Length;
+      if (len == 0) {
+        var msg = "No data could be read from it.";
+        throw new ArgumentException (msg, "stream");
+      }
+
+      if (len < length) {
+        _log.Warn (
+          String.Format (
+            "Only {0} byte(s) of data could be read from the stream.",
+            len
+          )
+        );
+      }
+
+      if (len <= WebSocket.FragmentLength)
+        broadcast (Opcode.Binary, bytes, null);
+      else
+        broadcast (Opcode.Binary, new MemoryStream (bytes), null);
+    }
+
+    /// <summary>
+    /// Sends <paramref name="data"/> asynchronously to every client in
+    /// the WebSocket service.
+    /// </summary>
+    /// <remarks>
+    /// This method does not wait for the send to be complete.
     /// </remarks>
     /// <param name="data">
     /// An array of <see cref="byte"/> that represents the binary data to send.
     /// </param>
     /// <param name="completed">
-    /// An <see cref="Action"/> delegate that references the method(s) called when
-    /// the send is complete.
+    ///   <para>
+    ///   An <see cref="Action"/> delegate or <see langword="null"/>
+    ///   if not needed.
+    ///   </para>
+    ///   <para>
+    ///   The delegate invokes the method called when the send is complete.
+    ///   </para>
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="data"/> is <see langword="null"/>.
+    /// </exception>
     public void BroadcastAsync (byte[] data, Action completed)
     {
-      var msg = _state.CheckIfAvailable (false, true, false) ??
-                WebSocket.CheckSendParameter (data);
-
-      if (msg != null) {
-        _logger.Error (msg);
-        return;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
+
+      if (data == null)
+        throw new ArgumentNullException ("data");
 
       if (data.LongLength <= WebSocket.FragmentLength)
         broadcastAsync (Opcode.Binary, data, completed);
@@ -461,30 +627,49 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Sends text <paramref name="data"/> asynchronously to every client in
+    /// Sends <paramref name="data"/> asynchronously to every client in
     /// the WebSocket service.
     /// </summary>
     /// <remarks>
-    /// This method doesn't wait for the send to be complete.
+    /// This method does not wait for the send to be complete.
     /// </remarks>
     /// <param name="data">
     /// A <see cref="string"/> that represents the text data to send.
     /// </param>
     /// <param name="completed">
-    /// An <see cref="Action"/> delegate that references the method(s) called when
-    /// the send is complete.
+    ///   <para>
+    ///   An <see cref="Action"/> delegate or <see langword="null"/>
+    ///   if not needed.
+    ///   </para>
+    ///   <para>
+    ///   The delegate invokes the method called when the send is complete.
+    ///   </para>
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="data"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="data"/> could not be UTF-8-encoded.
+    /// </exception>
     public void BroadcastAsync (string data, Action completed)
     {
-      var msg = _state.CheckIfAvailable (false, true, false) ??
-                WebSocket.CheckSendParameter (data);
-
-      if (msg != null) {
-        _logger.Error (msg);
-        return;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
 
-      var bytes = data.UTF8Encode ();
+      if (data == null)
+        throw new ArgumentNullException ("data");
+
+      byte[] bytes;
+      if (!data.TryGetUTF8EncodedBytes (out bytes)) {
+        var msg = "It could not be UTF-8-encoded.";
+        throw new ArgumentException (msg, "data");
+      }
+
       if (bytes.LongLength <= WebSocket.FragmentLength)
         broadcastAsync (Opcode.Text, bytes, completed);
       else
@@ -492,304 +677,827 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Sends binary data from the specified <see cref="Stream"/> asynchronously to
+    /// Sends the data from <paramref name="stream"/> asynchronously to
     /// every client in the WebSocket service.
     /// </summary>
     /// <remarks>
-    /// This method doesn't wait for the send to be complete.
+    ///   <para>
+    ///   The data is sent as the binary data.
+    ///   </para>
+    ///   <para>
+    ///   This method does not wait for the send to be complete.
+    ///   </para>
     /// </remarks>
     /// <param name="stream">
-    /// A <see cref="Stream"/> from which contains the binary data to send.
+    /// A <see cref="Stream"/> instance from which to read the data to send.
     /// </param>
     /// <param name="length">
-    /// An <see cref="int"/> that represents the number of bytes to send.
+    /// An <see cref="int"/> that specifies the number of bytes to send.
     /// </param>
     /// <param name="completed">
-    /// An <see cref="Action"/> delegate that references the method(s) called when
-    /// the send is complete.
+    ///   <para>
+    ///   An <see cref="Action"/> delegate or <see langword="null"/>
+    ///   if not needed.
+    ///   </para>
+    ///   <para>
+    ///   The delegate invokes the method called when the send is complete.
+    ///   </para>
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="stream"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="stream"/> cannot be read.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="length"/> is less than 1.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   No data could be read from <paramref name="stream"/>.
+    ///   </para>
+    /// </exception>
     public void BroadcastAsync (Stream stream, int length, Action completed)
     {
-      var msg = _state.CheckIfAvailable (false, true, false) ??
-                WebSocket.CheckSendParameters (stream, length);
-
-      if (msg != null) {
-        _logger.Error (msg);
-        return;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
 
-      stream.ReadBytesAsync (
-        length,
-        data => {
-          var len = data.Length;
-          if (len == 0) {
-            _logger.Error ("The data cannot be read from 'stream'.");
-            return;
-          }
+      if (stream == null)
+        throw new ArgumentNullException ("stream");
 
-          if (len < length)
-            _logger.Warn (
-              String.Format (
-                "The data with 'length' cannot be read from 'stream':\n  expected: {0}\n  actual: {1}",
-                length,
-                len));
+      if (!stream.CanRead) {
+        var msg = "It cannot be read.";
+        throw new ArgumentException (msg, "stream");
+      }
 
-          if (len <= WebSocket.FragmentLength)
-            broadcast (Opcode.Binary, data, completed);
-          else
-            broadcast (Opcode.Binary, new MemoryStream (data), completed);
-        },
-        ex => _logger.Fatal (ex.ToString ()));
+      if (length < 1) {
+        var msg = "Less than 1.";
+        throw new ArgumentException (msg, "length");
+      }
+
+      var bytes = stream.ReadBytes (length);
+
+      var len = bytes.Length;
+      if (len == 0) {
+        var msg = "No data could be read from it.";
+        throw new ArgumentException (msg, "stream");
+      }
+
+      if (len < length) {
+        _log.Warn (
+          String.Format (
+            "Only {0} byte(s) of data could be read from the stream.",
+            len
+          )
+        );
+      }
+
+      if (len <= WebSocket.FragmentLength)
+        broadcastAsync (Opcode.Binary, bytes, completed);
+      else
+        broadcastAsync (Opcode.Binary, new MemoryStream (bytes), completed);
     }
 
     /// <summary>
-    /// Sends a Ping to every client in the WebSocket service.
+    /// Sends a ping to every client in the WebSocket service.
     /// </summary>
     /// <returns>
-    /// A <c>Dictionary&lt;string, bool&gt;</c> that contains a collection of pairs of
-    /// a session ID and a value indicating whether the manager received a Pong from
-    /// each client in a time.
+    ///   <para>
+    ///   A <c>Dictionary&lt;string, bool&gt;</c>.
+    ///   </para>
+    ///   <para>
+    ///   It represents a collection of pairs of a session ID and
+    ///   a value indicating whether a pong has been received from
+    ///   the client within a time.
+    ///   </para>
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    [Obsolete ("This method will be removed.")]
     public Dictionary<string, bool> Broadping ()
     {
-      var msg = _state.CheckIfAvailable (false, true, false);
-      if (msg != null) {
-        _logger.Error (msg);
-        return null;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
 
       return Broadping (WebSocketFrame.EmptyPingBytes, _waitTime);
     }
 
     /// <summary>
-    /// Sends a Ping with the specified <paramref name="message"/> to every client in
+    /// Sends a ping with <paramref name="message"/> to every client in
     /// the WebSocket service.
     /// </summary>
     /// <returns>
-    /// A <c>Dictionary&lt;string, bool&gt;</c> that contains a collection of pairs of
-    /// a session ID and a value indicating whether the manager received a Pong from
-    /// each client in a time.
+    ///   <para>
+    ///   A <c>Dictionary&lt;string, bool&gt;</c>.
+    ///   </para>
+    ///   <para>
+    ///   It represents a collection of pairs of a session ID and
+    ///   a value indicating whether a pong has been received from
+    ///   the client within a time.
+    ///   </para>
     /// </returns>
     /// <param name="message">
-    /// A <see cref="string"/> that represents the message to send.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the message to send.
+    ///   </para>
+    ///   <para>
+    ///   The size must be 125 bytes or less in UTF-8.
+    ///   </para>
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The current state of the manager is not Start.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="message"/> could not be UTF-8-encoded.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The size of <paramref name="message"/> is greater than 125 bytes.
+    /// </exception>
+    [Obsolete ("This method will be removed.")]
     public Dictionary<string, bool> Broadping (string message)
     {
-      if (message == null || message.Length == 0)
-        return Broadping ();
-
-      byte[] data = null;
-      var msg = _state.CheckIfAvailable (false, true, false) ??
-                WebSocket.CheckPingParameter (message, out data);
-
-      if (msg != null) {
-        _logger.Error (msg);
-        return null;
+      if (_state != ServerState.Start) {
+        var msg = "The current state of the manager is not Start.";
+        throw new InvalidOperationException (msg);
       }
 
-      return Broadping (WebSocketFrame.CreatePingFrame (data, false).ToArray (), _waitTime);
+      if (message.IsNullOrEmpty ())
+        return Broadping (WebSocketFrame.EmptyPingBytes, _waitTime);
+
+      byte[] bytes;
+      if (!message.TryGetUTF8EncodedBytes (out bytes)) {
+        var msg = "It could not be UTF-8-encoded.";
+        throw new ArgumentException (msg, "message");
+      }
+
+      if (bytes.Length > 125) {
+        var msg = "Its size is greater than 125 bytes.";
+        throw new ArgumentOutOfRangeException ("message", msg);
+      }
+
+      var frame = WebSocketFrame.CreatePingFrame (bytes, false);
+      return Broadping (frame.ToArray (), _waitTime);
     }
 
     /// <summary>
-    /// Closes the session with the specified <paramref name="id"/>.
+    /// Closes the specified session.
     /// </summary>
     /// <param name="id">
     /// A <see cref="string"/> that represents the ID of the session to close.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="id"/> is an empty string.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The session could not be found.
+    /// </exception>
     public void CloseSession (string id)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.Close ();
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.Close ();
     }
 
     /// <summary>
-    /// Closes the session with the specified <paramref name="id"/>, <paramref name="code"/>,
-    /// and <paramref name="reason"/>.
+    /// Closes the specified session with <paramref name="code"/> and
+    /// <paramref name="reason"/>.
     /// </summary>
     /// <param name="id">
     /// A <see cref="string"/> that represents the ID of the session to close.
     /// </param>
     /// <param name="code">
-    /// A <see cref="ushort"/> that represents the status code indicating the reason for the close.
+    ///   <para>
+    ///   A <see cref="ushort"/> that represents the status code indicating
+    ///   the reason for the close.
+    ///   </para>
+    ///   <para>
+    ///   The status codes are defined in
+    ///   <see href="http://tools.ietf.org/html/rfc6455#section-7.4">
+    ///   Section 7.4</see> of RFC 6455.
+    ///   </para>
     /// </param>
     /// <param name="reason">
-    /// A <see cref="string"/> that represents the reason for the close.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the reason for the close.
+    ///   </para>
+    ///   <para>
+    ///   The size must be 123 bytes or less in UTF-8.
+    ///   </para>
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="code"/> is 1010 (mandatory extension).
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="code"/> is 1005 (no status) and there is
+    ///   <paramref name="reason"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="reason"/> could not be UTF-8-encoded.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The session could not be found.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    ///   <para>
+    ///   <paramref name="code"/> is less than 1000 or greater than 4999.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The size of <paramref name="reason"/> is greater than 123 bytes.
+    ///   </para>
+    /// </exception>
     public void CloseSession (string id, ushort code, string reason)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.Close (code, reason);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.Close (code, reason);
     }
 
     /// <summary>
-    /// Closes the session with the specified <paramref name="id"/>, <paramref name="code"/>,
-    /// and <paramref name="reason"/>.
+    /// Closes the specified session with <paramref name="code"/> and
+    /// <paramref name="reason"/>.
     /// </summary>
     /// <param name="id">
     /// A <see cref="string"/> that represents the ID of the session to close.
     /// </param>
     /// <param name="code">
-    /// One of the <see cref="CloseStatusCode"/> enum values, represents the status code
-    /// indicating the reason for the close.
+    ///   <para>
+    ///   One of the <see cref="CloseStatusCode"/> enum values.
+    ///   </para>
+    ///   <para>
+    ///   It represents the status code indicating the reason for the close.
+    ///   </para>
     /// </param>
     /// <param name="reason">
-    /// A <see cref="string"/> that represents the reason for the close.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the reason for the close.
+    ///   </para>
+    ///   <para>
+    ///   The size must be 123 bytes or less in UTF-8.
+    ///   </para>
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="code"/> is
+    ///   <see cref="CloseStatusCode.MandatoryExtension"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="code"/> is
+    ///   <see cref="CloseStatusCode.NoStatus"/> and there is
+    ///   <paramref name="reason"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="reason"/> could not be UTF-8-encoded.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The session could not be found.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The size of <paramref name="reason"/> is greater than 123 bytes.
+    /// </exception>
     public void CloseSession (string id, CloseStatusCode code, string reason)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.Close (code, reason);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.Close (code, reason);
     }
 
     /// <summary>
-    /// Sends a Ping to the client on the session with the specified <paramref name="id"/>.
+    /// Sends a ping to the client using the specified session.
     /// </summary>
     /// <returns>
-    /// <c>true</c> if the manager receives a Pong from the client in a time;
-    /// otherwise, <c>false</c>.
+    /// <c>true</c> if the send has done with no error and a pong has been
+    /// received from the client within a time; otherwise, <c>false</c>.
     /// </returns>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="id"/> is an empty string.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The session could not be found.
+    /// </exception>
     public bool PingTo (string id)
     {
       IWebSocketSession session;
-      return TryGetSession (id, out session) && session.Context.WebSocket.Ping ();
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      return session.Context.WebSocket.Ping ();
     }
 
     /// <summary>
-    /// Sends a Ping with the specified <paramref name="message"/> to the client on
-    /// the session with the specified <paramref name="id"/>.
+    /// Sends a ping with <paramref name="message"/> to the client using
+    /// the specified session.
     /// </summary>
     /// <returns>
-    /// <c>true</c> if the manager receives a Pong from the client in a time;
-    /// otherwise, <c>false</c>.
+    /// <c>true</c> if the send has done with no error and a pong has been
+    /// received from the client within a time; otherwise, <c>false</c>.
     /// </returns>
     /// <param name="message">
-    /// A <see cref="string"/> that represents the message to send.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the message to send.
+    ///   </para>
+    ///   <para>
+    ///   The size must be 125 bytes or less in UTF-8.
+    ///   </para>
     /// </param>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="message"/> could not be UTF-8-encoded.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The session could not be found.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The size of <paramref name="message"/> is greater than 125 bytes.
+    /// </exception>
     public bool PingTo (string message, string id)
     {
       IWebSocketSession session;
-      return TryGetSession (id, out session) && session.Context.WebSocket.Ping (message);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      return session.Context.WebSocket.Ping (message);
     }
 
     /// <summary>
-    /// Sends binary <paramref name="data"/> to the client on the session with
-    /// the specified <paramref name="id"/>.
+    /// Sends <paramref name="data"/> to the client using the specified session.
     /// </summary>
     /// <param name="data">
     /// An array of <see cref="byte"/> that represents the binary data to send.
     /// </param>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    ///   <para>
+    ///   <paramref name="id"/> is <see langword="null"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="data"/> is <see langword="null"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="id"/> is an empty string.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    ///   <para>
+    ///   The session could not be found.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The current state of the WebSocket connection is not Open.
+    ///   </para>
+    /// </exception>
     public void SendTo (byte[] data, string id)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.Send (data);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.Send (data);
     }
 
     /// <summary>
-    /// Sends text <paramref name="data"/> to the client on the session with
-    /// the specified <paramref name="id"/>.
+    /// Sends <paramref name="data"/> to the client using the specified session.
     /// </summary>
     /// <param name="data">
     /// A <see cref="string"/> that represents the text data to send.
     /// </param>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    ///   <para>
+    ///   <paramref name="id"/> is <see langword="null"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="data"/> is <see langword="null"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="data"/> could not be UTF-8-encoded.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    ///   <para>
+    ///   The session could not be found.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The current state of the WebSocket connection is not Open.
+    ///   </para>
+    /// </exception>
     public void SendTo (string data, string id)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.Send (data);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.Send (data);
     }
 
     /// <summary>
-    /// Sends binary <paramref name="data"/> asynchronously to the client on
-    /// the session with the specified <paramref name="id"/>.
+    /// Sends the data from <paramref name="stream"/> to the client using
+    /// the specified session.
     /// </summary>
     /// <remarks>
-    /// This method doesn't wait for the send to be complete.
+    /// The data is sent as the binary data.
+    /// </remarks>
+    /// <param name="stream">
+    /// A <see cref="Stream"/> instance from which to read the data to send.
+    /// </param>
+    /// <param name="length">
+    /// An <see cref="int"/> that specifies the number of bytes to send.
+    /// </param>
+    /// <param name="id">
+    /// A <see cref="string"/> that represents the ID of the session.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    ///   <para>
+    ///   <paramref name="id"/> is <see langword="null"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="stream"/> is <see langword="null"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="stream"/> cannot be read.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="length"/> is less than 1.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   No data could be read from <paramref name="stream"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    ///   <para>
+    ///   The session could not be found.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The current state of the WebSocket connection is not Open.
+    ///   </para>
+    /// </exception>
+    public void SendTo (Stream stream, int length, string id)
+    {
+      IWebSocketSession session;
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.Send (stream, length);
+    }
+
+    /// <summary>
+    /// Sends <paramref name="data"/> asynchronously to the client using
+    /// the specified session.
+    /// </summary>
+    /// <remarks>
+    /// This method does not wait for the send to be complete.
     /// </remarks>
     /// <param name="data">
     /// An array of <see cref="byte"/> that represents the binary data to send.
     /// </param>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
     /// <param name="completed">
-    /// An <c>Action&lt;bool&gt;</c> delegate that references the method(s) called when
-    /// the send is complete. A <see cref="bool"/> passed to this delegate is <c>true</c>
-    /// if the send is complete successfully.
+    ///   <para>
+    ///   An <c>Action&lt;bool&gt;</c> delegate or <see langword="null"/>
+    ///   if not needed.
+    ///   </para>
+    ///   <para>
+    ///   The delegate invokes the method called when the send is complete.
+    ///   </para>
+    ///   <para>
+    ///   <c>true</c> is passed to the method if the send has done with
+    ///   no error; otherwise, <c>false</c>.
+    ///   </para>
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    ///   <para>
+    ///   <paramref name="id"/> is <see langword="null"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="data"/> is <see langword="null"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="id"/> is an empty string.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    ///   <para>
+    ///   The session could not be found.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The current state of the WebSocket connection is not Open.
+    ///   </para>
+    /// </exception>
     public void SendToAsync (byte[] data, string id, Action<bool> completed)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.SendAsync (data, completed);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.SendAsync (data, completed);
     }
 
     /// <summary>
-    /// Sends text <paramref name="data"/> asynchronously to the client on
-    /// the session with the specified <paramref name="id"/>.
+    /// Sends <paramref name="data"/> asynchronously to the client using
+    /// the specified session.
     /// </summary>
     /// <remarks>
-    /// This method doesn't wait for the send to be complete.
+    /// This method does not wait for the send to be complete.
     /// </remarks>
     /// <param name="data">
     /// A <see cref="string"/> that represents the text data to send.
     /// </param>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
     /// <param name="completed">
-    /// An <c>Action&lt;bool&gt;</c> delegate that references the method(s) called when
-    /// the send is complete. A <see cref="bool"/> passed to this delegate is <c>true</c>
-    /// if the send is complete successfully.
+    ///   <para>
+    ///   An <c>Action&lt;bool&gt;</c> delegate or <see langword="null"/>
+    ///   if not needed.
+    ///   </para>
+    ///   <para>
+    ///   The delegate invokes the method called when the send is complete.
+    ///   </para>
+    ///   <para>
+    ///   <c>true</c> is passed to the method if the send has done with
+    ///   no error; otherwise, <c>false</c>.
+    ///   </para>
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    ///   <para>
+    ///   <paramref name="id"/> is <see langword="null"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="data"/> is <see langword="null"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="data"/> could not be UTF-8-encoded.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    ///   <para>
+    ///   The session could not be found.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The current state of the WebSocket connection is not Open.
+    ///   </para>
+    /// </exception>
     public void SendToAsync (string data, string id, Action<bool> completed)
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.SendAsync (data, completed);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.SendAsync (data, completed);
     }
 
     /// <summary>
-    /// Sends binary data from the specified <see cref="Stream"/> asynchronously to
-    /// the client on the session with the specified <paramref name="id"/>.
+    /// Sends the data from <paramref name="stream"/> asynchronously to
+    /// the client using the specified session.
     /// </summary>
     /// <remarks>
-    /// This method doesn't wait for the send to be complete.
+    ///   <para>
+    ///   The data is sent as the binary data.
+    ///   </para>
+    ///   <para>
+    ///   This method does not wait for the send to be complete.
+    ///   </para>
     /// </remarks>
     /// <param name="stream">
-    /// A <see cref="Stream"/> from which contains the binary data to send.
+    /// A <see cref="Stream"/> instance from which to read the data to send.
     /// </param>
     /// <param name="length">
-    /// An <see cref="int"/> that represents the number of bytes to send.
+    /// An <see cref="int"/> that specifies the number of bytes to send.
     /// </param>
     /// <param name="id">
-    /// A <see cref="string"/> that represents the ID of the session to find.
+    /// A <see cref="string"/> that represents the ID of the session.
     /// </param>
     /// <param name="completed">
-    /// An <c>Action&lt;bool&gt;</c> delegate that references the method(s) called when
-    /// the send is complete. A <see cref="bool"/> passed to this delegate is <c>true</c>
-    /// if the send is complete successfully.
+    ///   <para>
+    ///   An <c>Action&lt;bool&gt;</c> delegate or <see langword="null"/>
+    ///   if not needed.
+    ///   </para>
+    ///   <para>
+    ///   The delegate invokes the method called when the send is complete.
+    ///   </para>
+    ///   <para>
+    ///   <c>true</c> is passed to the method if the send has done with
+    ///   no error; otherwise, <c>false</c>.
+    ///   </para>
     /// </param>
-    public void SendToAsync (Stream stream, int length, string id, Action<bool> completed)
+    /// <exception cref="ArgumentNullException">
+    ///   <para>
+    ///   <paramref name="id"/> is <see langword="null"/>.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="stream"/> is <see langword="null"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    ///   <para>
+    ///   <paramref name="id"/> is an empty string.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="stream"/> cannot be read.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   <paramref name="length"/> is less than 1.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   No data could be read from <paramref name="stream"/>.
+    ///   </para>
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    ///   <para>
+    ///   The session could not be found.
+    ///   </para>
+    ///   <para>
+    ///   -or-
+    ///   </para>
+    ///   <para>
+    ///   The current state of the WebSocket connection is not Open.
+    ///   </para>
+    /// </exception>
+    public void SendToAsync (
+      Stream stream, int length, string id, Action<bool> completed
+    )
     {
       IWebSocketSession session;
-      if (TryGetSession (id, out session))
-        session.Context.WebSocket.SendAsync (stream, length, completed);
+      if (!TryGetSession (id, out session)) {
+        var msg = "The session could not be found.";
+        throw new InvalidOperationException (msg);
+      }
+
+      session.Context.WebSocket.SendAsync (stream, length, completed);
     }
 
     /// <summary>
@@ -825,28 +1533,38 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Tries to get the session with the specified <paramref name="id"/>.
+    /// Tries to get the session instance with <paramref name="id"/>.
     /// </summary>
     /// <returns>
-    /// <c>true</c> if the session is successfully found; otherwise, <c>false</c>.
+    /// <c>true</c> if the session is successfully found; otherwise,
+    /// <c>false</c>.
     /// </returns>
     /// <param name="id">
     /// A <see cref="string"/> that represents the ID of the session to find.
     /// </param>
     /// <param name="session">
-    /// When this method returns, a <see cref="IWebSocketSession"/> instance that
-    /// provides the access to the information in the session, or <see langword="null"/>
-    /// if it's not found. This parameter is passed uninitialized.
+    ///   <para>
+    ///   When this method returns, a <see cref="IWebSocketSession"/>
+    ///   instance or <see langword="null"/> if not found.
+    ///   </para>
+    ///   <para>
+    ///   The session instance provides the function to access
+    ///   the information in the session.
+    ///   </para>
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="id"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="id"/> is an empty string.
+    /// </exception>
     public bool TryGetSession (string id, out IWebSocketSession session)
     {
-      var msg = _state.CheckIfAvailable (false, true, false) ?? id.CheckIfValidSessionID ();
-      if (msg != null) {
-        _logger.Error (msg);
-        session = null;
+      if (id == null)
+        throw new ArgumentNullException ("id");
 
-        return false;
-      }
+      if (id.Length == 0)
+        throw new ArgumentException ("An empty string.", "id");
 
       return tryGetSession (id, out session);
     }
