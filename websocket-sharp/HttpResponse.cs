@@ -80,7 +80,7 @@ namespace WebSocketSharp
     public bool HasConnectionClose {
       get {
         var comparison = StringComparison.OrdinalIgnoreCase;
-        return Headers.Contains ("Connection", "close", comparison);
+        return Headers.Contains ("Connection", "close", comparison) || Headers.Contains ("Proxy-Connection", "close", comparison);
       }
     }
 
