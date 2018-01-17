@@ -459,12 +459,11 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Gets a value indicating whether the server provides
-    /// secure connections.
+    /// Gets a value indicating whether secure connections are provided.
     /// </summary>
     /// <value>
-    /// <c>true</c> if the server provides secure connections;
-    /// otherwise, <c>false</c>.
+    /// <c>true</c> if this instance provides secure connections; otherwise,
+    /// <c>false</c>.
     /// </value>
     public bool IsSecure {
       get {
@@ -495,20 +494,7 @@ namespace WebSocketSharp.Server
       }
 
       set {
-        string msg;
-        if (!canSet (out msg)) {
-          _log.Warn (msg);
-          return;
-        }
-
-        lock (_sync) {
-          if (!canSet (out msg)) {
-            _log.Warn (msg);
-            return;
-          }
-
-          _services.KeepClean = value;
-        }
+        _services.KeepClean = value;
       }
     }
 
@@ -634,15 +620,23 @@ namespace WebSocketSharp.Server
     /// Gets the configuration for secure connections.
     /// </summary>
     /// <remarks>
-    /// The configuration will be referenced when the server starts.
-    /// So you must configure it before calling the start method.
+    /// This configuration will be referenced when attempts to start,
+    /// so it must be configured before the start method is called.
     /// </remarks>
     /// <value>
     /// A <see cref="ServerSslConfiguration"/> that represents
     /// the configuration used to provide secure connections.
     /// </value>
+    /// <exception cref="InvalidOperationException">
+    /// This instance does not provide secure connections.
+    /// </exception>
     public ServerSslConfiguration SslConfiguration {
       get {
+        if (!_secure) {
+          var msg = "This instance does not provide secure connections.";
+          throw new InvalidOperationException (msg);
+        }
+
         return _listener.SslConfiguration;
       }
     }
@@ -700,12 +694,12 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Gets or sets the time to wait for the response to
-    /// the WebSocket Ping or Close.
+    /// Gets or sets the time to wait for the response to the WebSocket Ping or
+    /// Close.
     /// </summary>
     /// <remarks>
-    /// The set operation does nothing if the server has already
-    /// started or it is shutting down.
+    /// The set operation does nothing if the server has already started or
+    /// it is shutting down.
     /// </remarks>
     /// <value>
     ///   <para>
@@ -715,7 +709,7 @@ namespace WebSocketSharp.Server
     ///   The default value is the same as 1 second.
     ///   </para>
     /// </value>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="ArgumentOutOfRangeException">
     /// The value specified for a set operation is zero or less.
     /// </exception>
     public TimeSpan WaitTime {
@@ -724,23 +718,7 @@ namespace WebSocketSharp.Server
       }
 
       set {
-        if (value <= TimeSpan.Zero)
-          throw new ArgumentException ("Zero or less.", "value");
-
-        string msg;
-        if (!canSet (out msg)) {
-          _log.Warn (msg);
-          return;
-        }
-
-        lock (_sync) {
-          if (!canSet (out msg)) {
-            _log.Warn (msg);
-            return;
-          }
-
-          _services.WaitTime = value;
-        }
+        _services.WaitTime = value;
       }
     }
 
@@ -858,9 +836,6 @@ namespace WebSocketSharp.Server
     {
       message = null;
 
-      if (!_secure)
-        return true;
-
       var byUser = _listener.SslConfiguration.ServerCertificate != null;
 
       var path = _listener.CertificateFolderPath;
@@ -868,13 +843,13 @@ namespace WebSocketSharp.Server
 
       var both = byUser && withPort;
       if (both) {
-        _log.Warn ("The certificate associated with the port will be used.");
+        _log.Warn ("A server certificate associated with the port is used.");
         return true;
       }
 
       var either = byUser || withPort;
       if (!either) {
-        message = "There is no certificate used to authenticate the server.";
+        message = "There is no server certificate for secure connections.";
         return false;
       }
 
@@ -974,7 +949,7 @@ namespace WebSocketSharp.Server
           ThreadPool.QueueUserWorkItem (
             state => {
               try {
-                if (ctx.Request.IsUpgradeTo ("websocket")) {
+                if (ctx.Request.IsUpgradeRequest ("websocket")) {
                   processRequest (ctx.AcceptWebSocket (null));
                   return;
                 }
@@ -1485,12 +1460,12 @@ namespace WebSocketSharp.Server
     /// Starts receiving incoming requests.
     /// </summary>
     /// <remarks>
-    /// This method does nothing if the server has already
-    /// started or it is shutting down.
+    /// This method does nothing if the server has already started or
+    /// it is shutting down.
     /// </remarks>
     /// <exception cref="InvalidOperationException">
     ///   <para>
-    ///   There is no certificate used to authenticate the server.
+    ///   There is no server certificate for secure connections.
     ///   </para>
     ///   <para>
     ///   -or-
@@ -1501,9 +1476,11 @@ namespace WebSocketSharp.Server
     /// </exception>
     public void Start ()
     {
-      string msg;
-      if (!checkCertificate (out msg))
-        throw new InvalidOperationException (msg);
+      if (_secure) {
+        string msg;
+        if (!checkCertificate (out msg))
+          throw new InvalidOperationException (msg);
+      }
 
       start ();
     }

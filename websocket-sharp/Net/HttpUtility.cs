@@ -612,11 +612,12 @@ namespace WebSocketSharp.Net
 
     internal static Encoding GetEncoding (string contentType)
     {
-      var parts = contentType.Split (';');
-      foreach (var p in parts) {
-        var part = p.Trim ();
-        if (part.StartsWith ("charset", StringComparison.OrdinalIgnoreCase))
-          return Encoding.GetEncoding (part.GetValue ('=', true));
+      foreach (var elm in contentType.Split (';')) {
+        var part = elm.Trim ();
+        if (part.IndexOf ("charset", StringComparison.OrdinalIgnoreCase) != 0)
+          continue;
+
+        return Encoding.GetEncoding (part.GetValue ('=', true));
       }
 
       return null;
@@ -748,6 +749,22 @@ namespace WebSocketSharp.Net
         res.Close ();
         return res.ToArray ();
       }
+    }
+
+    internal static bool TryGetEncoding (
+      string contentType, out Encoding result
+    )
+    {
+      result = null;
+
+      try {
+        result = GetEncoding (contentType);
+      }
+      catch {
+        return false;
+      }
+
+      return result != null;
     }
 
     #endregion

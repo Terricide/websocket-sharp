@@ -172,24 +172,39 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Gets a value indicating whether the inactive sessions in
+    /// Gets or sets a value indicating whether the inactive sessions in
     /// the WebSocket services are cleaned up periodically.
     /// </summary>
+    /// <remarks>
+    /// The set operation does nothing if the server has already started or
+    /// it is shutting down.
+    /// </remarks>
     /// <value>
-    /// <c>true</c> if the inactive sessions in the services are
-    /// cleaned up every 60 seconds; otherwise, <c>false</c>.
+    /// <c>true</c> if the inactive sessions are cleaned up every 60 seconds;
+    /// otherwise, <c>false</c>.
     /// </value>
     public bool KeepClean {
       get {
         return _clean;
       }
 
-      internal set {
+      set {
+        string msg;
+        if (!canSet (out msg)) {
+          _log.Warn (msg);
+          return;
+        }
+
         lock (_sync) {
-          _clean = value;
+          if (!canSet (out msg)) {
+            _log.Warn (msg);
+            return;
+          }
 
           foreach (var host in _hosts.Values)
             host.KeepClean = value;
+
+          _clean = value;
         }
       }
     }
@@ -236,22 +251,44 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Gets the wait time for the response to the WebSocket Ping or Close.
+    /// Gets or sets the time to wait for the response to the WebSocket Ping or
+    /// Close.
     /// </summary>
+    /// <remarks>
+    /// The set operation does nothing if the server has already started or
+    /// it is shutting down.
+    /// </remarks>
     /// <value>
-    /// A <see cref="TimeSpan"/> that represents the wait time for the response.
+    /// A <see cref="TimeSpan"/> to wait for the response.
     /// </value>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value specified for a set operation is zero or less.
+    /// </exception>
     public TimeSpan WaitTime {
       get {
         return _waitTime;
       }
 
-      internal set {
+      set {
+        if (value <= TimeSpan.Zero)
+          throw new ArgumentOutOfRangeException ("value", "Zero or less.");
+
+        string msg;
+        if (!canSet (out msg)) {
+          _log.Warn (msg);
+          return;
+        }
+
         lock (_sync) {
-          _waitTime = value;
+          if (!canSet (out msg)) {
+            _log.Warn (msg);
+            return;
+          }
 
           foreach (var host in _hosts.Values)
             host.WaitTime = value;
+
+          _waitTime = value;
         }
       }
     }
@@ -336,13 +373,33 @@ namespace WebSocketSharp.Server
       var ret = new Dictionary<string, Dictionary<string, bool>> ();
 
       foreach (var host in Hosts) {
-        if (_state != ServerState.Start)
+        if (_state != ServerState.Start) {
+          _log.Error ("The server is shutting down.");
           break;
+        }
 
-        ret.Add (host.Path, host.Sessions.Broadping (frameAsBytes, timeout));
+        var res = host.Sessions.Broadping (frameAsBytes, timeout);
+        ret.Add (host.Path, res);
       }
 
       return ret;
+    }
+
+    private bool canSet (out string message)
+    {
+      message = null;
+
+      if (_state == ServerState.Start) {
+        message = "The server has already started.";
+        return false;
+      }
+
+      if (_state == ServerState.ShuttingDown) {
+        message = "The server is shutting down.";
+        return false;
+      }
+
+      return true;
     }
 
     #endregion
