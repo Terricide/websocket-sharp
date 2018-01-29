@@ -417,6 +417,7 @@ namespace WebSocketSharp.Net.WebSockets
     {
       _stream.Close ();
       _tcpClient.Close ();
+      //_tcpClient.Dispose();
     }
 
     internal void Close (HttpStatusCode code)

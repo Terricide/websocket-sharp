@@ -1,3 +1,7 @@
+## Notes ##
+- This is a fixed version of websocket-sharp which can run under .NET Core 2.0.
+- Tested with macOS 10.13.2 and Ubuntu Server 16
+
 ![Logo](websocket-sharp_logo.png)
 
 ## Welcome to websocket-sharp! ##
