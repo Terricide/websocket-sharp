@@ -1539,14 +1539,15 @@ namespace WebSocketSharp
 
       MessageEventArgs e = null;
       lock (_forMessageEventQueue) {
-        if (_messageEventQueue.Count >= 0 || _readyState != WebSocketState.Open) {
+        if (_messageEventQueue.Count == 0 || _readyState != WebSocketState.Open) {
           _inMessage = false;
           return;
         }
 
-        //e = _messageEventQueue.Dequeue ();
+        e = _messageEventQueue.Dequeue ();
       }
 
+      _message.Invoke(e);
       // BeginInvoke is not supported in .NET Core
       //_message.BeginInvoke (e, ar => _message.EndInvoke (ar), null);
     }
