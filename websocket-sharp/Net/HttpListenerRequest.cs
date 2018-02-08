@@ -48,10 +48,10 @@ using System.Text;
 namespace WebSocketSharp.Net
 {
   /// <summary>
-  /// Provides the access to a request to the <see cref="HttpListener"/>.
+  /// Represents an incoming request to a <see cref="HttpListener"/> instance.
   /// </summary>
   /// <remarks>
-  /// The HttpListenerRequest class cannot be inherited.
+  /// This class cannot be inherited.
   /// </remarks>
   public sealed class HttpListenerRequest
   {
@@ -66,15 +66,15 @@ namespace WebSocketSharp.Net
     private HttpListenerContext    _context;
     private CookieCollection       _cookies;
     private WebHeaderCollection    _headers;
-    private Guid                   _identifier;
+    private string                 _httpMethod;
     private Stream                 _inputStream;
-    private string                 _method;
+    private Version                _protocolVersion;
     private NameValueCollection    _queryString;
-    private Uri                    _referer;
+    private Guid                   _requestTraceIdentifier;
     private string                 _uri;
     private Uri                    _url;
+    private Uri                    _urlReferrer;
     private string[]               _userLanguages;
-    private Version                _version;
     private bool                   _websocketRequest;
     private bool                   _websocketRequestSet;
 
@@ -98,7 +98,7 @@ namespace WebSocketSharp.Net
       _connection = context.Connection;
       _contentLength = -1;
       _headers = new WebHeaderCollection ();
-      _identifier = Guid.NewGuid ();
+      _requestTraceIdentifier = Guid.NewGuid ();
     }
 
     #endregion
@@ -106,28 +106,48 @@ namespace WebSocketSharp.Net
     #region Public Properties
 
     /// <summary>
-    /// Gets the media types which are acceptable for the response.
+    /// Gets the media types that are acceptable for the client.
     /// </summary>
     /// <value>
-    /// An array of <see cref="string"/> that contains the media type names in
-    /// the Accept request-header, or <see langword="null"/> if the request didn't include
-    /// the Accept header.
+    ///   <para>
+    ///   An array of <see cref="string"/> that contains the names of the media
+    ///   types specified in the value of the Accept header.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the Accept header is not present.
+    ///   </para>
     /// </value>
     public string[] AcceptTypes {
       get {
+        var val = _headers["Accept"];
+        if (val == null)
+          return null;
+
+        if (_acceptTypes == null) {
+          _acceptTypes = val
+                         .SplitHeaderValue (',')
+                         .Trim ()
+                         .ToList ()
+                         .ToArray ();
+        }
+
         return _acceptTypes;
       }
     }
 
     /// <summary>
-    /// Gets an error code that identifies a problem with the client's certificate.
+    /// Gets an error code that identifies a problem with the certificate
+    /// provided by the client.
     /// </summary>
     /// <value>
-    /// Always returns <c>0</c>.
+    /// An <see cref="int"/> that represents an error code.
     /// </value>
+    /// <exception cref="NotSupportedException">
+    /// This property is not supported.
+    /// </exception>
     public int ClientCertificateError {
       get {
-        return 0; // TODO: Always returns 0.
+        throw new NotSupportedException ();
       }
     }
 
@@ -171,7 +191,8 @@ namespace WebSocketSharp.Net
     /// Gets the media type of the entity body data included in the request.
     /// </summary>
     /// <value>
-    /// A <see cref="string"/> from the value of the Content-Type header.
+    /// A <see cref="string"/> that represents the value of the Content-Type
+    /// header.
     /// </value>
     public string ContentType {
       get {
@@ -213,10 +234,10 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the HTTP headers used in the request.
+    /// Gets the headers included in the request.
     /// </summary>
     /// <value>
-    /// A <see cref="NameValueCollection"/> that contains the HTTP headers used in the request.
+    /// A <see cref="NameValueCollection"/> that contains the headers.
     /// </value>
     public NameValueCollection Headers {
       get {
@@ -225,14 +246,15 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the HTTP method used in the request.
+    /// Gets the HTTP method specified by the client.
     /// </summary>
     /// <value>
-    /// A <see cref="string"/> that represents the HTTP method used in the request.
+    /// A <see cref="string"/> that represents the HTTP method specified in
+    /// the request line.
     /// </value>
     public string HttpMethod {
       get {
-        return _method;
+        return _httpMethod;
       }
     }
 
@@ -245,7 +267,7 @@ namespace WebSocketSharp.Net
     ///   A <see cref="Stream"/> that contains the entity body data.
     ///   </para>
     ///   <para>
-    ///   <see cref="Stream.Null"/> if no entity body data is included.
+    ///   <see cref="Stream.Null"/> if not included.
     ///   </para>
     /// </value>
     public Stream InputStream {
@@ -264,7 +286,7 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets a value indicating whether the client that sent the request is authenticated.
+    /// Gets a value indicating whether the client is authenticated.
     /// </summary>
     /// <value>
     /// <c>true</c> if the client is authenticated; otherwise, <c>false</c>.
@@ -314,8 +336,8 @@ namespace WebSocketSharp.Net
     public bool IsWebSocketRequest {
       get {
         if (!_websocketRequestSet) {
-          _websocketRequest = _method == "GET"
-                              && _version > HttpVersion.Version10
+          _websocketRequest = _httpMethod == "GET"
+                              && _protocolVersion > HttpVersion.Version10
                               && _headers.Upgrades ("websocket");
 
           _websocketRequestSet = true;
@@ -334,7 +356,7 @@ namespace WebSocketSharp.Net
     /// </value>
     public bool KeepAlive {
       get {
-        return _headers.KeepsAlive (_version);
+        return _headers.KeepsAlive (_protocolVersion);
       }
     }
 
@@ -352,14 +374,15 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the HTTP version used in the request.
+    /// Gets the HTTP version specified by the client.
     /// </summary>
     /// <value>
-    /// A <see cref="Version"/> that represents the HTTP version used in the request.
+    /// A <see cref="Version"/> that represents the HTTP version specified in
+    /// the request line.
     /// </value>
     public Version ProtocolVersion {
       get {
-        return _version;
+        return _protocolVersion;
       }
     }
 
@@ -388,14 +411,21 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the raw URL (without the scheme, host, and port) requested by the client.
+    /// Gets the raw URL (without the scheme, host, and port) requested by
+    /// the client.
     /// </summary>
     /// <value>
-    /// A <see cref="string"/> that represents the raw URL requested by the client.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the raw URL specified in
+    ///   the request.
+    ///   </para>
+    ///   <para>
+    ///   It includes the query string if present.
+    ///   </para>
     /// </value>
     public string RawUrl {
       get {
-        return _url.PathAndQuery; // TODO: Should decode?
+        return _url.PathAndQuery;
       }
     }
 
@@ -413,14 +443,14 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the request identifier of a incoming HTTP request.
+    /// Gets the trace identifier of the request.
     /// </summary>
     /// <value>
-    /// A <see cref="Guid"/> that represents the identifier of a request.
+    /// A <see cref="Guid"/> that represents the trace identifier.
     /// </value>
     public Guid RequestTraceIdentifier {
       get {
-        return _identifier;
+        return _requestTraceIdentifier;
       }
     }
 
@@ -428,7 +458,7 @@ namespace WebSocketSharp.Net
     /// Gets the URL requested by the client.
     /// </summary>
     /// <value>
-    /// A <see cref="Uri"/> that represents the URL requested by the client.
+    /// A <see cref="Uri"/> that represents the URL specified in the request.
     /// </value>
     public Uri Url {
       get {
@@ -437,23 +467,33 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the URL of the resource from which the requested URL was obtained.
+    /// Gets the URI of the resource from which the requested URL was obtained.
     /// </summary>
     /// <value>
-    /// A <see cref="Uri"/> that represents the value of the Referer request-header,
-    /// or <see langword="null"/> if the request didn't include an Referer header.
+    ///   <para>
+    ///   A <see cref="Uri"/> from the value of the Referer header.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the Referer header is not present.
+    ///   </para>
     /// </value>
     public Uri UrlReferrer {
       get {
-        return _referer;
+        return _urlReferrer;
       }
     }
 
     /// <summary>
-    /// Gets the information about the user agent originating the request.
+    /// Gets the user agent from which the request is originated.
     /// </summary>
     /// <value>
-    /// A <see cref="string"/> that represents the value of the User-Agent request-header.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the value of the User-Agent
+    ///   header.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the User-Agent header is not present.
+    ///   </para>
     /// </value>
     public string UserAgent {
       get {
@@ -475,10 +515,18 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the internet host name and port number (if present) specified by the client.
+    /// Gets the server host name requested by the client.
     /// </summary>
     /// <value>
-    /// A <see cref="string"/> that represents the value of the Host request-header.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the value of the Host header.
+    ///   </para>
+    ///   <para>
+    ///   It includes the port number if provided.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the Host header is not present.
+    ///   </para>
     /// </value>
     public string UserHostName {
       get {
@@ -487,15 +535,27 @@ namespace WebSocketSharp.Net
     }
 
     /// <summary>
-    /// Gets the natural languages which are preferred for the response.
+    /// Gets the natural languages that are acceptable for the client.
     /// </summary>
     /// <value>
-    /// An array of <see cref="string"/> that contains the natural language names in
-    /// the Accept-Language request-header, or <see langword="null"/> if the request
-    /// didn't include an Accept-Language header.
+    ///   <para>
+    ///   An array of <see cref="string"/> that contains the names of the
+    ///   natural languages specified in the value of the Accept-Language
+    ///   header.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the Accept-Language header is not present.
+    ///   </para>
     /// </value>
     public string[] UserLanguages {
       get {
+        var val = _headers["Accept-Language"];
+        if (val == null)
+          return null;
+
+        if (_userLanguages == null)
+          _userLanguages = val.Split (',').Trim ().ToList ().ToArray ();
+
         return _userLanguages;
       }
     }
@@ -525,16 +585,6 @@ namespace WebSocketSharp.Net
       _headers.InternalSet (name, val, false);
 
       var lower = name.ToLower (CultureInfo.InvariantCulture);
-      if (lower == "accept") {
-        _acceptTypes = val.SplitHeaderValue (',').ToList ().ToArray ();
-        return;
-      }
-
-      if (lower == "accept-language") {
-        _userLanguages = val.Split (',');
-        return;
-      }
-
       if (lower == "content-length") {
         long len;
         if (!Int64.TryParse (val, out len)) {
@@ -569,7 +619,7 @@ namespace WebSocketSharp.Net
           return;
         }
 
-        _referer = referer;
+        _urlReferrer = referer;
         return;
       }
     }
@@ -578,7 +628,7 @@ namespace WebSocketSharp.Net
     {
       var host = _headers["Host"];
       var hasHost = host != null && host.Length > 0;
-      if (_version > HttpVersion.Version10 && !hasHost) {
+      if (_protocolVersion > HttpVersion.Version10 && !hasHost) {
         _context.ErrorMessage = "Invalid Host header";
         return;
       }
@@ -597,7 +647,7 @@ namespace WebSocketSharp.Net
 
       var transferEnc = _headers["Transfer-Encoding"];
       if (transferEnc != null) {
-        if (_version < HttpVersion.Version11) {
+        if (_protocolVersion < HttpVersion.Version11) {
           _context.ErrorMessage = "Invalid Transfer-Encoding header";
           return;
         }
@@ -614,7 +664,7 @@ namespace WebSocketSharp.Net
       }
 
       if (_contentLength == -1 && !_chunked) {
-        if (_method == "POST" || _method == "PUT") {
+        if (_httpMethod == "POST" || _httpMethod == "PUT") {
           _context.ErrorMessage = String.Empty;
           _context.ErrorStatus = 411;
 
@@ -623,7 +673,7 @@ namespace WebSocketSharp.Net
       }
 
       var expect = _headers["Expect"];
-      if (_version > HttpVersion.Version10 && expect != null) {
+      if (_protocolVersion > HttpVersion.Version10 && expect != null) {
         var comparison = StringComparison.OrdinalIgnoreCase;
         if (!expect.Equals ("100-continue", comparison)) {
           _context.ErrorMessage = "Invalid Expect header";
@@ -716,9 +766,9 @@ namespace WebSocketSharp.Net
         return;
       }
 
-      _method = method;
+      _httpMethod = method;
       _uri = uri;
-      _version = ver;
+      _protocolVersion = ver;
     }
 
     #endregion
@@ -801,7 +851,7 @@ namespace WebSocketSharp.Net
     public override string ToString ()
     {
       var buff = new StringBuilder (64);
-      buff.AppendFormat ("{0} {1} HTTP/{2}\r\n", _method, _uri, _version);
+      buff.AppendFormat ("{0} {1} HTTP/{2}\r\n", _httpMethod, _uri, _protocolVersion);
       buff.Append (_headers.ToString ());
 
       return buff.ToString ();
