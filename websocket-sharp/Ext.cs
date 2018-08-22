@@ -141,6 +141,25 @@ namespace WebSocketSharp
       }
     }
 
+    private static bool isHttpMethod (this string value)
+    {
+      return value == "GET"
+             || value == "HEAD"
+             || value == "POST"
+             || value == "PUT"
+             || value == "DELETE"
+             || value == "CONNECT"
+             || value == "OPTIONS"
+             || value == "TRACE";
+    }
+
+    private static bool isHttpMethod10 (this string value)
+    {
+      return value == "GET"
+             || value == "HEAD"
+             || value == "POST";
+    }
+
     private static void times (this ulong n, Action action)
     {
       for (ulong i = 0; i < n; i++)
@@ -195,6 +214,28 @@ namespace WebSocketSharp
       return method == CompressionMethod.Deflate
              ? stream.compressToArray ()
              : stream.ToByteArray ();
+    }
+
+    /// <summary>
+    /// Determines whether the specified string contains any of characters in
+    /// the specified array of <see cref="char"/>.
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> if <paramref name="value"/> contains any of characters in
+    /// <paramref name="anyOf"/>; otherwise, <c>false</c>.
+    /// </returns>
+    /// <param name="value">
+    /// A <see cref="string"/> to test.
+    /// </param>
+    /// <param name="anyOf">
+    /// An array of <see cref="char"/> that contains one or more characters to
+    /// seek.
+    /// </param>
+    internal static bool Contains (this string value, params char[] anyOf)
+    {
+      return anyOf != null && anyOf.Length > 0
+             ? value.IndexOfAny (anyOf) > -1
+             : false;
     }
 
     internal static bool Contains (
@@ -429,18 +470,22 @@ namespace WebSocketSharp
     }
 
     /// <summary>
-    /// Gets the name from the specified <see cref="string"/> that contains a pair of name and
-    /// value separated by a separator character.
+    /// Gets the name from the specified string that contains a pair of
+    /// name and value separated by a character.
     /// </summary>
     /// <returns>
-    /// A <see cref="string"/> that represents the name if any; otherwise, <c>null</c>.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the name.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the name is not present.
+    ///   </para>
     /// </returns>
     /// <param name="nameAndValue">
-    /// A <see cref="string"/> that contains a pair of name and value separated by
-    /// a separator character.
+    /// A <see cref="string"/> that contains a pair of name and value.
     /// </param>
     /// <param name="separator">
-    /// A <see cref="char"/> that represents the separator character.
+    /// A <see cref="char"/> used to separate name and value.
     /// </param>
     internal static string GetName (this string nameAndValue, char separator)
     {
@@ -449,28 +494,53 @@ namespace WebSocketSharp
     }
 
     /// <summary>
-    /// Gets the value from the specified <see cref="string"/> that contains a pair of name and
-    /// value separated by a separator character.
+    /// Gets the value from the specified string that contains a pair of
+    /// name and value separated by a character.
     /// </summary>
     /// <returns>
-    /// A <see cref="string"/> that represents the value if any; otherwise, <c>null</c>.
+    ///   <para>
+    ///   A <see cref="string"/> that represents the value.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the value is not present.
+    ///   </para>
     /// </returns>
     /// <param name="nameAndValue">
-    /// A <see cref="string"/> that contains a pair of name and value separated by
-    /// a separator character.
+    /// A <see cref="string"/> that contains a pair of name and value.
     /// </param>
     /// <param name="separator">
-    /// A <see cref="char"/> that represents the separator character.
+    /// A <see cref="char"/> used to separate name and value.
     /// </param>
     internal static string GetValue (this string nameAndValue, char separator)
     {
-      var idx = nameAndValue.IndexOf (separator);
-      return idx > -1 && idx < nameAndValue.Length - 1
-             ? nameAndValue.Substring (idx + 1).Trim ()
-             : null;
+      return nameAndValue.GetValue (separator, false);
     }
 
-    internal static string GetValue (this string nameAndValue, char separator, bool unquote)
+    /// <summary>
+    /// Gets the value from the specified string that contains a pair of
+    /// name and value separated by a character.
+    /// </summary>
+    /// <returns>
+    ///   <para>
+    ///   A <see cref="string"/> that represents the value.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the value is not present.
+    ///   </para>
+    /// </returns>
+    /// <param name="nameAndValue">
+    /// A <see cref="string"/> that contains a pair of name and value.
+    /// </param>
+    /// <param name="separator">
+    /// A <see cref="char"/> used to separate name and value.
+    /// </param>
+    /// <param name="unquote">
+    /// A <see cref="bool"/>: <c>true</c> if unquotes the value; otherwise,
+    /// <c>false</c>.
+    /// </param>
+    internal static string GetValue (
+      this string nameAndValue, char separator, bool unquote
+    )
     {
       var idx = nameAndValue.IndexOf (separator);
       if (idx < 0 || idx == nameAndValue.Length - 1)
@@ -525,6 +595,13 @@ namespace WebSocketSharp
       return opcode == Opcode.Text || opcode == Opcode.Binary;
     }
 
+    internal static bool IsHttpMethod (this string value, Version version)
+    {
+      return version == HttpVersion.Version10
+             ? value.isHttpMethod10 ()
+             : value.isHttpMethod ();
+    }
+
     internal static bool IsPortNumber (this int value)
     {
       return value > 0 && value < 65536;
@@ -558,7 +635,7 @@ namespace WebSocketSharp
       for (var i = 0; i < len; i++) {
         var c = value[i];
         if (c < 0x20) {
-          if (!"\r\n\t".Contains (c))
+          if ("\r\n\t".IndexOf (c) == -1)
             return false;
 
           if (c == '\n') {
@@ -567,7 +644,7 @@ namespace WebSocketSharp
               break;
 
             c = value[i];
-            if (!" \t".Contains (c))
+            if (" \t".IndexOf (c) == -1)
               return false;
           }
 
@@ -590,7 +667,7 @@ namespace WebSocketSharp
         if (c >= 0x7f)
           return false;
 
-        if (_tspecials.Contains (c))
+        if (_tspecials.IndexOf (c) > -1)
           return false;
       }
 
@@ -793,36 +870,46 @@ namespace WebSocketSharp
     )
     {
       var len = value.Length;
-      var seps = new string (separators);
 
       var buff = new StringBuilder (32);
+      var end = len - 1;
       var escaped = false;
       var quoted = false;
 
-      for (var i = 0; i < len; i++) {
+      for (var i = 0; i <= end; i++) {
         var c = value[i];
-        if (c == '"') {
-          if (escaped)
-            escaped = !escaped;
-          else
-            quoted = !quoted;
-        }
-        else if (c == '\\') {
-          if (i < len - 1 && value[i + 1] == '"')
-            escaped = true;
-        }
-        else if (seps.Contains (c)) {
-          if (!quoted) {
-            yield return buff.ToString ();
+        buff.Append (c);
 
-            buff.Length = 0;
+        if (c == '"') {
+          if (escaped) {
+            escaped = false;
             continue;
           }
-        }
-        else {
+
+          quoted = !quoted;
+          continue;
         }
 
-        buff.Append (c);
+        if (c == '\\') {
+          if (i == end)
+            break;
+
+          if (value[i + 1] == '"')
+            escaped = true;
+
+          continue;
+        }
+
+        if (Array.IndexOf (separators, c) > -1) {
+          if (quoted)
+            continue;
+
+          buff.Length -= 1;
+          yield return buff.ToString ();
+
+          buff.Length = 0;
+          continue;
+        }
       }
 
       yield return buff.ToString ();
@@ -1058,17 +1145,17 @@ namespace WebSocketSharp
     internal static string Unquote (this string value)
     {
       var start = value.IndexOf ('"');
-      if (start < 0)
+      if (start == -1)
         return value;
 
       var end = value.LastIndexOf ('"');
-      var len = end - start - 1;
+      if (end == start)
+        return value;
 
-      return len < 0
-             ? value
-             : len == 0
-               ? String.Empty
-               : value.Substring (start + 1, len).Replace ("\\\"", "\"");
+      var len = end - start - 1;
+      return len > 0
+             ? value.Substring (start + 1, len).Replace ("\\\"", "\"")
+             : String.Empty;
     }
 
     internal static bool Upgrades (
@@ -1124,29 +1211,6 @@ namespace WebSocketSharp
     #endregion
 
     #region Public Methods
-
-    /// <summary>
-    /// Determines whether the specified <see cref="string"/> contains any of characters in
-    /// the specified array of <see cref="char"/>.
-    /// </summary>
-    /// <returns>
-    /// <c>true</c> if <paramref name="value"/> contains any of <paramref name="chars"/>;
-    /// otherwise, <c>false</c>.
-    /// </returns>
-    /// <param name="value">
-    /// A <see cref="string"/> to test.
-    /// </param>
-    /// <param name="chars">
-    /// An array of <see cref="char"/> that contains characters to find.
-    /// </param>
-    public static bool Contains (this string value, params char[] chars)
-    {
-      return chars == null || chars.Length == 0
-             ? true
-             : value == null || value.Length == 0
-               ? false
-               : value.IndexOfAny (chars) > -1;
-    }
 
     /// <summary>
     /// Emits the specified <see cref="EventHandler"/> delegate if it isn't <see langword="null"/>.
@@ -1879,11 +1943,15 @@ namespace WebSocketSharp
     }
 
     /// <summary>
-    /// Converts the specified <see cref="string"/> to a <see cref="Uri"/>.
+    /// Converts the specified string to a <see cref="Uri"/>.
     /// </summary>
     /// <returns>
-    /// A <see cref="Uri"/> converted from <paramref name="value"/> or
-    /// <see langword="null"/> if the convert has failed.
+    ///   <para>
+    ///   A <see cref="Uri"/> converted from <paramref name="value"/>.
+    ///   </para>
+    ///   <para>
+    ///   <see langword="null"/> if the conversion has failed.
+    ///   </para>
     /// </returns>
     /// <param name="value">
     /// A <see cref="string"/> to convert.

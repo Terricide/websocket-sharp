@@ -617,7 +617,7 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Gets the configuration for secure connections.
+    /// Gets the configuration for secure connection.
     /// </summary>
     /// <remarks>
     /// This configuration will be referenced when attempts to start,
@@ -766,11 +766,6 @@ namespace WebSocketSharp.Server
     public event EventHandler<HttpRequestEventArgs> OnOptions;
 
     /// <summary>
-    /// Occurs when the server receives an HTTP PATCH request.
-    /// </summary>
-    public event EventHandler<HttpRequestEventArgs> OnPatch;
-
-    /// <summary>
     /// Occurs when the server receives an HTTP POST request.
     /// </summary>
     public event EventHandler<HttpRequestEventArgs> OnPost;
@@ -841,17 +836,13 @@ namespace WebSocketSharp.Server
       var path = _listener.CertificateFolderPath;
       var withPort = EndPointListener.CertificateExists (_port, path);
 
-      var both = byUser && withPort;
-      if (both) {
-        _log.Warn ("A server certificate associated with the port is used.");
-        return true;
-      }
-
-      var either = byUser || withPort;
-      if (!either) {
-        message = "There is no server certificate for secure connections.";
+      if (!(byUser || withPort)) {
+        message = "There is no server certificate for secure connection.";
         return false;
       }
+
+      if (byUser && withPort)
+        _log.Warn ("The server certificate associated with the port is used.");
 
       return true;
     }
@@ -908,15 +899,13 @@ namespace WebSocketSharp.Server
                       ? OnPut
                       : method == "DELETE"
                         ? OnDelete
-                        : method == "OPTIONS"
-                          ? OnOptions
-                          : method == "TRACE"
-                            ? OnTrace
-                            : method == "CONNECT"
-                              ? OnConnect
-                              : method == "PATCH"
-                                ? OnPatch
-                                : null;
+                        : method == "CONNECT"
+                          ? OnConnect
+                          : method == "OPTIONS"
+                            ? OnOptions
+                            : method == "TRACE"
+                              ? OnTrace
+                              : null;
 
       if (evt != null)
         evt (this, new HttpRequestEventArgs (context, _docRootPath));
@@ -929,7 +918,13 @@ namespace WebSocketSharp.Server
 
     private void processRequest (HttpListenerWebSocketContext context)
     {
-      var path = context.RequestUri.AbsolutePath;
+      var uri = context.RequestUri;
+      if (uri == null) {
+        context.Close (HttpStatusCode.BadRequest);
+        return;
+      }
+
+      var path = uri.AbsolutePath;
 
       WebSocketServiceHost host;
       if (!_services.InternalTryGetServiceHost (path, out host)) {
@@ -1465,7 +1460,7 @@ namespace WebSocketSharp.Server
     /// </remarks>
     /// <exception cref="InvalidOperationException">
     ///   <para>
-    ///   There is no server certificate for secure connections.
+    ///   There is no server certificate for secure connection.
     ///   </para>
     ///   <para>
     ///   -or-
@@ -1486,28 +1481,20 @@ namespace WebSocketSharp.Server
     }
 
     /// <summary>
-    /// Stops receiving incoming requests and closes each connection.
+    /// Stops receiving incoming requests.
     /// </summary>
-    /// <remarks>
-    /// This method does nothing if the server is not started,
-    /// it is shutting down, or it has already stopped.
-    /// </remarks>
     public void Stop ()
     {
-      stop (1005, String.Empty);
+      stop (1001, String.Empty);
     }
 
     /// <summary>
     /// Stops receiving incoming requests and closes each connection.
     /// </summary>
-    /// <remarks>
-    /// This method does nothing if the server is not started,
-    /// it is shutting down, or it has already stopped.
-    /// </remarks>
     /// <param name="code">
     ///   <para>
-    ///   A <see cref="ushort"/> that represents the status code
-    ///   indicating the reason for the WebSocket connection close.
+    ///   A <see cref="ushort"/> that represents the status code indicating
+    ///   the reason for the WebSocket connection close.
     ///   </para>
     ///   <para>
     ///   The status codes are defined in
@@ -1517,8 +1504,8 @@ namespace WebSocketSharp.Server
     /// </param>
     /// <param name="reason">
     ///   <para>
-    ///   A <see cref="string"/> that represents the reason for
-    ///   the WebSocket connection close.
+    ///   A <see cref="string"/> that represents the reason for the WebSocket
+    ///   connection close.
     ///   </para>
     ///   <para>
     ///   The size must be 123 bytes or less in UTF-8.
@@ -1543,8 +1530,7 @@ namespace WebSocketSharp.Server
     ///   -or-
     ///   </para>
     ///   <para>
-    ///   <paramref name="code"/> is 1005 (no status) and
-    ///   there is <paramref name="reason"/>.
+    ///   <paramref name="code"/> is 1005 (no status) and there is reason.
     ///   </para>
     ///   <para>
     ///   -or-
@@ -1553,6 +1539,7 @@ namespace WebSocketSharp.Server
     ///   <paramref name="reason"/> could not be UTF-8-encoded.
     ///   </para>
     /// </exception>
+    [Obsolete ("This method will be removed.")]
     public void Stop (ushort code, string reason)
     {
       if (!code.IsCloseStatusCode ()) {
@@ -1589,23 +1576,19 @@ namespace WebSocketSharp.Server
     /// <summary>
     /// Stops receiving incoming requests and closes each connection.
     /// </summary>
-    /// <remarks>
-    /// This method does nothing if the server is not started,
-    /// it is shutting down, or it has already stopped.
-    /// </remarks>
     /// <param name="code">
     ///   <para>
     ///   One of the <see cref="CloseStatusCode"/> enum values.
     ///   </para>
     ///   <para>
-    ///   It represents the status code indicating the reason for
-    ///   the WebSocket connection close.
+    ///   It represents the status code indicating the reason for the WebSocket
+    ///   connection close.
     ///   </para>
     /// </param>
     /// <param name="reason">
     ///   <para>
-    ///   A <see cref="string"/> that represents the reason for
-    ///   the WebSocket connection close.
+    ///   A <see cref="string"/> that represents the reason for the WebSocket
+    ///   connection close.
     ///   </para>
     ///   <para>
     ///   The size must be 123 bytes or less in UTF-8.
@@ -1624,8 +1607,7 @@ namespace WebSocketSharp.Server
     ///   </para>
     ///   <para>
     ///   <paramref name="code"/> is
-    ///   <see cref="CloseStatusCode.NoStatus"/> and
-    ///   there is <paramref name="reason"/>.
+    ///   <see cref="CloseStatusCode.NoStatus"/> and there is reason.
     ///   </para>
     ///   <para>
     ///   -or-
@@ -1634,6 +1616,7 @@ namespace WebSocketSharp.Server
     ///   <paramref name="reason"/> could not be UTF-8-encoded.
     ///   </para>
     /// </exception>
+    [Obsolete ("This method will be removed.")]
     public void Stop (CloseStatusCode code, string reason)
     {
       if (code == CloseStatusCode.MandatoryExtension) {
