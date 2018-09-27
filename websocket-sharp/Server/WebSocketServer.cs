@@ -79,6 +79,7 @@ namespace WebSocketSharp.Server
     private object                             _sync;
     private Func<IIdentity, NetworkCredential> _userCredFinder;
 
+    //private List<TcpClient> _clientList;
     #endregion
 
     #region Static Constructor
@@ -844,6 +845,7 @@ namespace WebSocketSharp.Server
         TcpClient cl = null;
         try {
           cl = _listener.AcceptTcpClient ();
+
           ThreadPool.QueueUserWorkItem (
             state => {
               try {
@@ -943,9 +945,86 @@ namespace WebSocketSharp.Server
         throw new InvalidOperationException (msg, ex);
       }
 
-      _receiveThread = new Thread (new ThreadStart (receiveRequest));
-      _receiveThread.IsBackground = true;
-      _receiveThread.Start ();
+      _ct = _cts.Token;
+      //_clientList = new List<TcpClient>();
+      _listener.BeginAcceptTcpClient(_listenHandler, _listener);
+
+      //_receiveThread = new Thread (new ThreadStart (receiveRequest));
+      //_receiveThread.IsBackground = true;
+      //_receiveThread.Start ();
+    }
+
+    private CancellationToken _ct;
+    private CancellationTokenSource _cts = new CancellationTokenSource();
+
+        private void _listenHandler(IAsyncResult ar)
+    {
+        //Stop if operation was cancelled.
+        if (_ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var listener = ar.AsyncState as TcpListener;
+        if (listener == null)
+        {
+            return;
+        }
+
+        //Check cancellation again. Stop if operation was cancelled.
+        if (_ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        //Starts waiting for the next request.
+        listener.BeginAcceptTcpClient(_listenHandler, listener);
+
+        //Gets client and starts processing received request.
+        // using (TcpClient client = listener.EndAcceptTcpClient(ar))
+        // {
+        TcpClient client = listener.EndAcceptTcpClient(ar);
+        ThreadPool.QueueUserWorkItem(
+               state => {
+                   try
+                   {
+                       var ctx = new TcpListenerWebSocketContext(
+                        client, null, _secure, _sslConfigInUse, _log
+                      );
+
+                       if (!ctx.Authenticate(_authSchemes, _realmInUse, _userCredFinder))
+                           return;
+
+                        /*
+                        lock(_clientList){
+                            // Clean up
+                               for (int i = 0; i < _clientList.Count; i++)
+                               {
+                                   if (_clientList[i].Connected == false)
+                                   {
+                                       _clientList.RemoveAt(i);
+                                       i--;
+                                   }
+                               }
+
+                               
+                        }
+                        _clientList.Add(client);
+                        */
+
+                        processRequest(ctx);
+
+                   }
+                   catch (Exception ex)
+                   {
+                       _log.Error(ex.Message);
+                       _log.Debug(ex.ToString());
+
+                        client.Close();
+                   }
+               }
+             );
+       // }
     }
 
     private void stop (ushort code, string reason)
@@ -982,7 +1061,30 @@ namespace WebSocketSharp.Server
       try {
         var threw = false;
         try {
-          stopReceiving (5000);
+            //If listening has been cancelled, simply go out from method.
+            if (_ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            //Cancels listening.
+            _cts.Cancel();
+
+            // Close all clients
+            /*
+            foreach(TcpClient client in _clientList) {
+                if(client.Connected == true) {
+                    client.Close();
+                    client.Dispose();
+                }
+            }
+            */
+
+            //Waits a little, to guarantee that all operation receive information about cancellation.
+            Thread.Sleep(100);
+
+            _listener.Stop();
+          //stopReceiving (5000);
         }
         catch {
           threw = true;

@@ -1552,7 +1552,9 @@ namespace WebSocketSharp
         e = _messageEventQueue.Dequeue ();
       }
 
-      _message.BeginInvoke (e, ar => _message.EndInvoke (ar), null);
+      _message.Invoke(e);
+      // BeginInvoke is not supported in .NET Core
+      //_message.BeginInvoke (e, ar => _message.EndInvoke (ar), null);
     }
 
     private bool ping (byte[] data)
