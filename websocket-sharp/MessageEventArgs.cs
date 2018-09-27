@@ -44,6 +44,7 @@ namespace WebSocketSharp
   ///   the <see cref="Data"/> or <see cref="RawData"/> property.
   ///   </para>
   /// </remarks>
+  [Serializable]
   public class MessageEventArgs : EventArgs
   {
     #region Private Fields

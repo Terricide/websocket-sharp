@@ -12,3 +12,5 @@ obj
 *.user
 *.userprefs
 UpgradeLog*.*
+/.vs/websocket-sharp/v15/Server/sqlite3
+/.vs/websocket-sharp/DesignTimeBuild
