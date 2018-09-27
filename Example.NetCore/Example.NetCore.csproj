@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>netcoreapp2.1</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Example\NotificationMessage.cs" Link="NotificationMessage.cs" />
+    <Compile Include="..\Example\Notifier.cs" Link="Notifier.cs" />
+    <Compile Include="..\Example\Program.cs" Link="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\websocket-sharp\websocket-sharp.csproj" />
+  </ItemGroup>
+
+</Project>
