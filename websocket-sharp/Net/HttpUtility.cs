@@ -134,6 +134,72 @@ namespace WebSocketSharp.Net
                  : -1;
     }
 
+    private static int getNumber (char c)
+    {
+      return c >= '0' && c <= '9'
+             ? c - '0'
+             : c >= 'A' && c <= 'F'
+               ? c - 'A' + 10
+               : c >= 'a' && c <= 'f'
+                 ? c - 'a' + 10
+                 : -1;
+    }
+
+    private static int getNumber (byte[] bytes, int offset, int count)
+    {
+      var ret = 0;
+
+      var end = offset + count - 1;
+      for (var i = offset; i <= end; i++) {
+        var num = getNumber ((char) bytes[i]);
+        if (num == -1)
+          return -1;
+
+        ret = (ret << 4) + num;
+      }
+
+      return ret;
+    }
+
+    private static int getNumber (string s, int offset, int count)
+    {
+      var ret = 0;
+
+      var end = offset + count - 1;
+      for (var i = offset; i <= end; i++) {
+        var num = getNumber (s[i]);
+        if (num == -1)
+          return -1;
+
+        ret = (ret << 4) + num;
+      }
+
+      return ret;
+    }
+
+    private static string htmlEncode (string s, bool minimal)
+    {
+      var buff = new StringBuilder ();
+
+      foreach (var c in s) {
+        buff.Append (
+          c == '"'
+          ? "&quot;"
+          : c == '&'
+            ? "&amp;"
+            : c == '<'
+              ? "&lt;"
+              : c == '>'
+                ? "&gt;"
+                : !minimal && c > 159
+                  ? String.Format ("&#{0};", (int) c)
+                  : c.ToString ()
+        );
+      }
+
+      return buff.ToString ();
+    }
+
     private static void initEntities ()
     {
       // Build the dictionary of HTML entity references.
@@ -393,34 +459,15 @@ namespace WebSocketSharp.Net
       _entities.Add ("euro", '\u20AC');
     }
 
-    private static bool isAlphabet (byte b)
-    {
-      return (b >= 65 && b <= 90)
-             || (b >= 97 && b <= 122);
-    }
-
     private static bool isAlphabet (char c)
     {
       return (c >= 'A' && c <= 'Z')
              || (c >= 'a' && c <= 'z');
     }
 
-    private static bool isNumeric (byte b)
-    {
-      return b >= 48 && b <= 57;
-    }
-
     private static bool isNumeric (char c)
     {
       return c >= '0' && c <= '9';
-    }
-
-    private static bool isUnreserved (byte b)
-    {
-      return b == 42
-             || b == 45
-             || b == 46
-             || b == 95;
     }
 
     private static bool isUnreserved (char c)
@@ -452,37 +499,61 @@ namespace WebSocketSharp.Net
              || c == '~';
     }
 
-    private static bool notEncoded (char c)
+    private static byte[] urlDecodeToBytes (byte[] bytes, int offset, int count)
     {
-      return c == '!' ||
-             c == '\'' ||
-             c == '(' ||
-             c == ')' ||
-             c == '*' ||
-             c == '-' ||
-             c == '.' ||
-             c == '_';
+      using (var buff = new MemoryStream ()) {
+        var end = offset + count - 1;
+        for (var i = offset; i <= end; i++) {
+          var b = bytes[i];
+
+          var c = (char) b;
+          if (c == '%') {
+            if (i > end - 2)
+              break;
+
+            var num = getNumber (bytes, i + 1, 2);
+            if (num == -1)
+              break;
+
+            buff.WriteByte ((byte) num);
+            i += 2;
+
+            continue;
+          }
+
+          if (c == '+') {
+            buff.WriteByte ((byte) ' ');
+            continue;
+          }
+
+          buff.WriteByte (b);
+        }
+
+        buff.Close ();
+        return buff.ToArray ();
+      }
     }
 
     private static void urlEncode (byte b, Stream output)
     {
       if (b > 31 && b < 127) {
-        if (b == 32) {
+        var c = (char) b;
+        if (c == ' ') {
           output.WriteByte ((byte) '+');
           return;
         }
 
-        if (isNumeric (b)) {
+        if (isNumeric (c)) {
           output.WriteByte (b);
           return;
         }
 
-        if (isAlphabet (b)) {
+        if (isAlphabet (c)) {
           output.WriteByte (b);
           return;
         }
 
-        if (isUnreserved (b)) {
+        if (isUnreserved (c)) {
           output.WriteByte (b);
           return;
         }
@@ -491,81 +562,34 @@ namespace WebSocketSharp.Net
       output.WriteByte ((byte) '%');
 
       var i = (int) b;
-      var idx = i >> 4;
-      output.WriteByte ((byte) _hexChars[idx]);
-
-      idx = i & 0x0F;
-      output.WriteByte ((byte) _hexChars[idx]);
+      output.WriteByte ((byte) _hexChars[i >> 4]);
+      output.WriteByte ((byte) _hexChars[i & 0x0F]);
     }
 
-    private static void urlEncodeUnicode (char c, Stream output)
+    private static byte[] urlEncodeToBytes (byte[] bytes, int offset, int count)
     {
-      if (c > 31 && c < 127) {
-        if (c == ' ') {
-          output.WriteByte ((byte) '+');
-          return;
-        }
+      using (var buff = new MemoryStream ()) {
+        var end = offset + count - 1;
+        for (var i = offset; i <= end; i++)
+          urlEncode (bytes[i], buff);
 
-        if (isNumeric (c)) {
-          output.WriteByte ((byte) c);
-          return;
-        }
-
-        if (isAlphabet (c)) {
-          output.WriteByte ((byte) c);
-          return;
-        }
-
-        if (isUnreserved (c)) {
-          output.WriteByte ((byte) c);
-          return;
-        }
+        buff.Close ();
+        return buff.ToArray ();
       }
-
-      output.WriteByte ((byte) '%');
-      output.WriteByte ((byte) 'u');
-
-      var i = (int) c;
-      var idx = i >> 12;
-      output.WriteByte ((byte) _hexChars[idx]);
-
-      idx = (i >> 8) & 0x0F;
-      output.WriteByte ((byte) _hexChars[idx]);
-
-      idx = (i >> 4) & 0x0F;
-      output.WriteByte ((byte) _hexChars[idx]);
-
-      idx = i & 0x0F;
-      output.WriteByte ((byte) _hexChars[idx]);
     }
 
-    private static void urlPathEncode (char c, Stream result)
+    private static void urlPathEncode (char c, StringBuilder output)
     {
-      if (c < 33 || c > 126) {
-        var bytes = Encoding.UTF8.GetBytes (c.ToString ());
-        foreach (var b in bytes) {
-          result.WriteByte ((byte) '%');
-
-          var i = (int) b;
-          var idx = i >> 4;
-          result.WriteByte ((byte) _hexChars[idx]);
-
-          idx = i & 0x0F;
-          result.WriteByte ((byte) _hexChars[idx]);
-        }
-
+      if (c > 32 && c < 127) {
+        output.Append (c);
         return;
       }
 
-      if (c == ' ') {
-        result.WriteByte ((byte) '%');
-        result.WriteByte ((byte) '2');
-        result.WriteByte ((byte) '0');
-
-        return;
+      var bytes = Encoding.UTF8.GetBytes (new[] { c });
+      foreach (var b in bytes) {
+        var i = (int) b;
+        output.AppendFormat ("%{0}{1}", _hexChars[i >> 4], _hexChars[i & 0x0F]);
       }
-
-      result.WriteByte ((byte) c);
     }
 
     private static void writeCharBytes (char c, IList buffer, Encoding encoding)
@@ -711,107 +735,6 @@ namespace WebSocketSharp.Net
       return null;
     }
 
-    internal static string InternalUrlDecode (
-      byte[] bytes, int offset, int count, Encoding encoding)
-    {
-      var output = new StringBuilder ();
-      using (var acc = new MemoryStream ()) {
-        var end = count + offset;
-        for (var i = offset; i < end; i++) {
-          if (bytes[i] == '%' && i + 2 < count && bytes[i + 1] != '%') {
-            int xchar;
-            if (bytes[i + 1] == (byte) 'u' && i + 5 < end) {
-              if (acc.Length > 0) {
-                output.Append (getChars (acc, encoding));
-                acc.SetLength (0);
-              }
-
-              xchar = getChar (bytes, i + 2, 4);
-              if (xchar != -1) {
-                output.Append ((char) xchar);
-                i += 5;
-
-                continue;
-              }
-            }
-            else if ((xchar = getChar (bytes, i + 1, 2)) != -1) {
-              acc.WriteByte ((byte) xchar);
-              i += 2;
-
-              continue;
-            }
-          }
-
-          if (acc.Length > 0) {
-            output.Append (getChars (acc, encoding));
-            acc.SetLength (0);
-          }
-
-          if (bytes[i] == '+') {
-            output.Append (' ');
-            continue;
-          }
-
-          output.Append ((char) bytes[i]);
-        }
-
-        if (acc.Length > 0)
-          output.Append (getChars (acc, encoding));
-      }
-
-      return output.ToString ();
-    }
-
-    internal static byte[] InternalUrlDecodeToBytes (byte[] bytes, int offset, int count)
-    {
-      using (var res = new MemoryStream ()) {
-        var end = offset + count;
-        for (var i = offset; i < end; i++) {
-          var c = (char) bytes[i];
-          if (c == '+') {
-            c = ' ';
-          }
-          else if (c == '%' && i < end - 2) {
-            var xchar = getChar (bytes, i + 1, 2);
-            if (xchar != -1) {
-              c = (char) xchar;
-              i += 2;
-            }
-          }
-
-          res.WriteByte ((byte) c);
-        }
-
-        res.Close ();
-        return res.ToArray ();
-      }
-    }
-
-    internal static byte[] InternalUrlEncodeToBytes (
-      byte[] bytes, int offset, int count
-    )
-    {
-      using (var buff = new MemoryStream ()) {
-        var end = offset + count;
-        for (var i = offset; i < end; i++)
-          urlEncode (bytes[i], buff);
-
-        buff.Close ();
-        return buff.ToArray ();
-      }
-    }
-
-    internal static byte[] InternalUrlEncodeUnicodeToBytes (string s)
-    {
-      using (var buff = new MemoryStream ()) {
-        foreach (var c in s)
-          urlEncodeUnicode (c, buff);
-
-        buff.Close ();
-        return buff.ToArray ();
-      }
-    }
-
     internal static bool TryGetEncoding (
       string contentType, out Encoding result
     )
@@ -834,34 +757,24 @@ namespace WebSocketSharp.Net
 
     public static string HtmlAttributeEncode (string s)
     {
-      if (s == null || s.Length == 0)
-        return s;
+      if (s == null)
+        throw new ArgumentNullException ("s");
 
-      var buff = new StringBuilder ();
-
-      foreach (var c in s) {
-        buff.Append (
-          c == '&'
-          ? "&amp;"
-          : c == '"'
-            ? "&quot;"
-            : c == '<'
-              ? "&lt;"
-              : c == '>'
-                ? "&gt;"
-                : c.ToString ()
-        );
-      }
-
-      return buff.ToString ();
+      return s.Length > 0 ? htmlEncode (s, true) : s;
     }
 
     public static void HtmlAttributeEncode (string s, TextWriter output)
     {
+      if (s == null)
+        throw new ArgumentNullException ("s");
+
       if (output == null)
         throw new ArgumentNullException ("output");
 
-      output.Write (HtmlAttributeEncode (s));
+      if (s.Length == 0)
+        return;
+
+      output.Write (htmlEncode (s, true));
     }
 
     /// <summary>
@@ -1005,53 +918,24 @@ namespace WebSocketSharp.Net
 
     public static string HtmlEncode (string s)
     {
-      if (s == null || s.Length == 0)
-        return s;
+      if (s == null)
+        throw new ArgumentNullException ("s");
 
-      var buff = new StringBuilder ();
-
-      foreach (var c in s) {
-        if (c == '&') {
-          buff.Append ("&amp;");
-          continue;
-        }
-
-        if (c == '"') {
-          buff.Append ("&quot;");
-          continue;
-        }
-
-        if (c == '<') {
-          buff.Append ("&lt;");
-          continue;
-        }
-
-        if (c == '>') {
-          buff.Append ("&gt;");
-          continue;
-        }
-
-        if (c > 159) {
-          // MS .NET starts encoding with &# from 160 and stops at 255.
-          // We do not do that. One reason is the 65308/65310 unicode
-          // characters that look like '<' and '>'.
-
-          buff.AppendFormat ("&#{0};", (int) c);
-          continue;
-        }
-
-        buff.Append (c);
-      }
-
-      return buff.ToString ();
+      return s.Length > 0 ? htmlEncode (s, false) : s;
     }
 
     public static void HtmlEncode (string s, TextWriter output)
     {
+      if (s == null)
+        throw new ArgumentNullException ("s");
+
       if (output == null)
         throw new ArgumentNullException ("output");
 
-      output.Write (HtmlEncode (s));
+      if (s.Length == 0)
+        return;
+
+      output.Write (htmlEncode (s, false));
     }
 
     public static string UrlDecode (string s)
@@ -1061,69 +945,48 @@ namespace WebSocketSharp.Net
 
     public static string UrlDecode (string s, Encoding encoding)
     {
-      if (s == null || s.Length == 0 || !s.Contains ('%', '+'))
+      if (s == null)
+        throw new ArgumentNullException ("s");
+
+      if (s.Length == 0)
         return s;
 
-      if (encoding == null)
-        encoding = Encoding.UTF8;
-
-      var buff = new List<byte> ();
-      var len = s.Length;
-      for (var i = 0; i < len; i++) {
-        var c = s[i];
-        if (c == '%' && i + 2 < len && s[i + 1] != '%') {
-          int xchar;
-          if (s[i + 1] == 'u' && i + 5 < len) {
-            // Unicode hex sequence.
-            xchar = getChar (s, i + 2, 4);
-            if (xchar != -1) {
-              writeCharBytes ((char) xchar, buff, encoding);
-              i += 5;
-            }
-            else {
-              writeCharBytes ('%', buff, encoding);
-            }
-          }
-          else if ((xchar = getChar (s, i + 1, 2)) != -1) {
-            writeCharBytes ((char) xchar, buff, encoding);
-            i += 2;
-          }
-          else {
-            writeCharBytes ('%', buff, encoding);
-          }
-
-          continue;
-        }
-
-        if (c == '+') {
-          writeCharBytes (' ', buff, encoding);
-          continue;
-        }
-
-        writeCharBytes (c, buff, encoding);
-      }
-
-      return encoding.GetString (buff.ToArray ());
+      var bytes = Encoding.ASCII.GetBytes (s);
+      return (encoding ?? Encoding.UTF8).GetString (
+               urlDecodeToBytes (bytes, 0, bytes.Length)
+             );
     }
 
     public static string UrlDecode (byte[] bytes, Encoding encoding)
     {
-      int len;
-      return bytes == null
-             ? null
-             : (len = bytes.Length) == 0
-               ? String.Empty
-               : InternalUrlDecode (bytes, 0, len, encoding ?? Encoding.UTF8);
-    }
-
-    public static string UrlDecode (byte[] bytes, int offset, int count, Encoding encoding)
-    {
       if (bytes == null)
-        return null;
+        throw new ArgumentNullException ("bytes");
 
       var len = bytes.Length;
-      if (len == 0 || count == 0)
+      return len > 0
+             ? (encoding ?? Encoding.UTF8).GetString (
+                 urlDecodeToBytes (bytes, 0, len)
+               )
+             : String.Empty;
+    }
+
+    public static string UrlDecode (
+      byte[] bytes, int offset, int count, Encoding encoding
+    )
+    {
+      if (bytes == null)
+        throw new ArgumentNullException ("bytes");
+
+      var len = bytes.Length;
+      if (len == 0) {
+        if (offset != 0)
+          throw new ArgumentOutOfRangeException ("offset");
+
+        if (count != 0)
+          throw new ArgumentOutOfRangeException ("count");
+
         return String.Empty;
+      }
 
       if (offset < 0 || offset >= len)
         throw new ArgumentOutOfRangeException ("offset");
@@ -1131,78 +994,86 @@ namespace WebSocketSharp.Net
       if (count < 0 || count > len - offset)
         throw new ArgumentOutOfRangeException ("count");
 
-      return InternalUrlDecode (bytes, offset, count, encoding ?? Encoding.UTF8);
+      return count > 0
+             ? (encoding ?? Encoding.UTF8).GetString (
+                 urlDecodeToBytes (bytes, offset, count)
+               )
+             : String.Empty;
     }
 
     public static byte[] UrlDecodeToBytes (byte[] bytes)
     {
-      int len;
-      return bytes != null && (len = bytes.Length) > 0
-             ? InternalUrlDecodeToBytes (bytes, 0, len)
+      if (bytes == null)
+        throw new ArgumentNullException ("bytes");
+
+      var len = bytes.Length;
+      return len > 0
+             ? urlDecodeToBytes (bytes, 0, len)
              : bytes;
     }
 
     public static byte[] UrlDecodeToBytes (string s)
     {
-      return UrlDecodeToBytes (s, Encoding.UTF8);
-    }
-
-    public static byte[] UrlDecodeToBytes (string s, Encoding encoding)
-    {
       if (s == null)
-        return null;
+        throw new ArgumentNullException ("s");
 
       if (s.Length == 0)
         return new byte[0];
 
-      var bytes = (encoding ?? Encoding.UTF8).GetBytes (s);
-      return InternalUrlDecodeToBytes (bytes, 0, bytes.Length);
+      var bytes = Encoding.ASCII.GetBytes (s);
+      return urlDecodeToBytes (bytes, 0, bytes.Length);
     }
 
     public static byte[] UrlDecodeToBytes (byte[] bytes, int offset, int count)
     {
-      int len;
-      if (bytes == null || (len = bytes.Length) == 0)
-        return bytes;
+      if (bytes == null)
+        throw new ArgumentNullException ("bytes");
 
-      if (count == 0)
-        return new byte[0];
+      var len = bytes.Length;
+      if (len == 0) {
+        if (offset != 0)
+          throw new ArgumentOutOfRangeException ("offset");
+
+        if (count != 0)
+          throw new ArgumentOutOfRangeException ("count");
+
+        return bytes;
+      }
 
       if (offset < 0 || offset >= len)
         throw new ArgumentOutOfRangeException ("offset");
 
-      if (count < 0 || count > len - offset )
+      if (count < 0 || count > len - offset)
         throw new ArgumentOutOfRangeException ("count");
 
-      return InternalUrlDecodeToBytes (bytes, offset, count);
+      return count > 0
+             ? urlDecodeToBytes (bytes, offset, count)
+             : new byte[0];
     }
 
     public static string UrlEncode (byte[] bytes)
     {
       if (bytes == null)
-        return null;
+        throw new ArgumentNullException ("bytes");
 
       var len = bytes.Length;
       return len > 0
-             ? Encoding.ASCII.GetString (
-                 InternalUrlEncodeToBytes (bytes, 0, len)
-               )
+             ? Encoding.ASCII.GetString (urlEncodeToBytes (bytes, 0, len))
              : String.Empty;
     }
 
     public static string UrlEncode (byte[] bytes, int offset, int count)
     {
-      if (bytes == null) {
-        if (count != 0)
-          throw new ArgumentNullException ("bytes");
-
-        return null;
-      }
+      if (bytes == null)
+        throw new ArgumentNullException ("bytes");
 
       var len = bytes.Length;
       if (len == 0) {
-        if (offset != 0 || count != 0)
-          throw new ArgumentException ("An empty byte array.", "bytes");
+        if (offset != 0)
+          throw new ArgumentOutOfRangeException ("offset");
+
+        if (count != 0)
+          throw new ArgumentOutOfRangeException ("count");
 
         return String.Empty;
       }
@@ -1215,7 +1086,7 @@ namespace WebSocketSharp.Net
 
       return count > 0
              ? Encoding.ASCII.GetString (
-                 InternalUrlEncodeToBytes (bytes, offset, count)
+                 urlEncodeToBytes (bytes, offset, count)
                )
              : String.Empty;
     }
@@ -1228,7 +1099,7 @@ namespace WebSocketSharp.Net
     public static string UrlEncode (string s, Encoding encoding)
     {
       if (s == null)
-        return s;
+        throw new ArgumentNullException ("s");
 
       var len = s.Length;
       if (len == 0)
@@ -1240,35 +1111,30 @@ namespace WebSocketSharp.Net
       var bytes = new byte[encoding.GetMaxByteCount (len)];
       var realLen = encoding.GetBytes (s, 0, len, bytes, 0);
 
-      return Encoding.ASCII.GetString (
-               InternalUrlEncodeToBytes (bytes, 0, realLen)
-             );
+      return Encoding.ASCII.GetString (urlEncodeToBytes (bytes, 0, realLen));
     }
 
     public static byte[] UrlEncodeToBytes (byte[] bytes)
     {
       if (bytes == null)
-        return null;
+        throw new ArgumentNullException ("bytes");
 
       var len = bytes.Length;
-      return len > 0
-             ? InternalUrlEncodeToBytes (bytes, 0, len)
-             : bytes;
+      return len > 0 ? urlEncodeToBytes (bytes, 0, len) : bytes;
     }
 
     public static byte[] UrlEncodeToBytes (byte[] bytes, int offset, int count)
     {
-      if (bytes == null) {
-        if (count != 0)
-          throw new ArgumentNullException ("bytes");
-
-        return null;
-      }
+      if (bytes == null)
+        throw new ArgumentNullException ("bytes");
 
       var len = bytes.Length;
       if (len == 0) {
-        if (offset != 0 || count != 0)
-          throw new ArgumentException ("An empty byte array.", "bytes");
+        if (offset != 0)
+          throw new ArgumentOutOfRangeException ("offset");
+
+        if (count != 0)
+          throw new ArgumentOutOfRangeException ("count");
 
         return bytes;
       }
@@ -1279,9 +1145,7 @@ namespace WebSocketSharp.Net
       if (count < 0 || count > len - offset)
         throw new ArgumentOutOfRangeException ("count");
 
-      return count > 0
-             ? InternalUrlEncodeToBytes (bytes, offset, count)
-             : new byte[0];
+      return count > 0 ? urlEncodeToBytes (bytes, offset, count) : new byte[0];
     }
 
     public static byte[] UrlEncodeToBytes (string s)
@@ -1292,44 +1156,29 @@ namespace WebSocketSharp.Net
     public static byte[] UrlEncodeToBytes (string s, Encoding encoding)
     {
       if (s == null)
-        return null;
+        throw new ArgumentNullException ("s");
 
       if (s.Length == 0)
         return new byte[0];
 
       var bytes = (encoding ?? Encoding.UTF8).GetBytes (s);
-      return InternalUrlEncodeToBytes (bytes, 0, bytes.Length);
-    }
-
-    public static string UrlEncodeUnicode (string s)
-    {
-      if (s == null || s.Length == 0)
-        return s;
-
-      return Encoding.ASCII.GetString (InternalUrlEncodeUnicodeToBytes (s));
-    }
-
-    public static byte[] UrlEncodeUnicodeToBytes (string s)
-    {
-      return s == null
-             ? null
-             : s.Length == 0
-               ? new byte[0]
-               : InternalUrlEncodeUnicodeToBytes (s);
+      return urlEncodeToBytes (bytes, 0, bytes.Length);
     }
 
     public static string UrlPathEncode (string s)
     {
-      if (s == null || s.Length == 0)
+      if (s == null)
+        throw new ArgumentNullException ("s");
+
+      if (s.Length == 0)
         return s;
 
-      using (var buff = new MemoryStream ()) {
-        foreach (var c in s)
-          urlPathEncode (c, buff);
+      var buff = new StringBuilder ();
 
-        buff.Close ();
-        return Encoding.ASCII.GetString (buff.ToArray ());
-      }
+      foreach (var c in s)
+        urlPathEncode (c, buff);
+
+      return buff.ToString ();
     }
 
     #endregion
